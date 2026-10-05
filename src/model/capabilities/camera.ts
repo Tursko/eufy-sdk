@@ -22,6 +22,12 @@ export const CAMERA_CMD = {
   /** Wrapped T8410 power switch on HomeBase 3. */
   PRIVACY_MODE: 6250,
   /**
+   * Privacy mode (app `CMD_INDOOR_ENABLE_PRIVACY_MODE_S350`): the S350 family's camera on/off. Rides the
+   * `1350` SET_PAYLOAD envelope (`{account_id,cmd:6250,mChannel,mValue3:0,payload:{switch}}`), switch
+   * 0 = privacy off (camera ON), 1 = privacy on (camera OFF). See {@link ridesPrivacyEnvelope}.
+   */
+  PRIVACY_ENABLE: 6250,
+  /**
    * Camera status LED on/off — the "power/recording" indicator. The
    * app JS has a sibling param `1056` (`APP_CMD_LIVEVIEW_LED_SWITCH`) for the SAME UI "Status Light"
    * setting on some other model/generation — confirmed real (a full parser class exists) but tested
@@ -397,6 +403,26 @@ const ENABLE_BIT_FLOODLIGHT_TYPES: ReadonlySet<number> = new Set<number>([
   DeviceType.FLOODLIGHT_CAMERA_8424,
 ]);
 
+/**
+ * True for the S350 indoor pan/tilt family, whose camera on/off is the privacy switch (6250) and NOT 1035.
+ *
+ * ✅ Observed live on an S350 (T8416, HomeBase-attached): privacy mode set in the eufy app is a state 1035
+ * does not touch — a 1035 "on" left the camera in privacy mode, recording no events — and the cloud record
+ * carries a 1035 that never follows the app's switch. The same family split, wire and polarity are what
+ * bropat/eufy-security-client ships for these device types (`enableDevice`, `DeviceEnabledIndoorS350Property`).
+ *
+ * The other families stay on 1035: the app's own frames were captured writing it on six cameras of four device
+ * types, none of them this family.
+ */
+function ridesPrivacyEnvelope(ctx: AvailabilityContext): boolean {
+  return isIndoorPanTiltS350(ctx);
+}
+
+/** Raw 6250 `switch` for a desired power state: privacy on (1) is camera off. */
+function privacySwitchValue(on: boolean): number {
+  return on ? 0 : 1;
+}
+
 /** Raw 1035 value for a desired power state, honouring the family polarity. */
 function powerValue(on: boolean, ctx: CommandContext): number {
   return isEnableBitPolarity(ctx) ? (on ? 1 : 0) : on ? 0 : 1;
@@ -425,11 +451,25 @@ function hasUnreflectedHomeBasePower(ctx: CommandContext): boolean {
 }
 
 /**
- * Camera power: T8410 on HomeBase 3 uses the wrapped disable-bit switch when its firmware selects
- * that route. Other cameras retain the captured 1035 scalar command and family polarity.
- * The payload retains mValue3=0 and the camera channel; the transport injects the account identity.
+ * Camera power on/off: `CMD_DEVS_SWITCH` (1035) by default, the capability supplying the param and the
+ * polarity-resolved value while `"auto"` lets the transport seal it per session.
+ *
+ * ✅ Confirmed against the current app's own frames. Across six cameras of four device types and both
+ * topologies, every on/off the app sent was `1035` carrying the same body — `[u32 channel][u32 value]
+ * [account_id]`, the channel selecting an attached camera — sealed at level-2 or level-1 exactly as the
+ * session's key allowed. The capture contains no `6250` frame at all.
+ *
+ * Two exceptions, both a single `1350` SET_PAYLOAD frame on the camera channel carrying 6250 with `mValue3` 0
+ * (the transport injects the account identity). Neither is the multi-frame privacy burst.
+ * - The S350 family ({@link ridesPrivacyEnvelope}): its power is the privacy switch, sent `"auto"`, so a
+ *   keyless session gets the level-1 string-payload form of the same object.
+ * - T8410 on HomeBase 3 when its firmware selects that route ({@link usesHomeBasePowerPayload}): the wrapped
+ *   disable-bit switch.
  */
 function powerCommand(on: boolean, ctx: CommandContext): Command {
+  if (ridesPrivacyEnvelope(ctx)) {
+    return setPayload(CAMERA_CMD.PRIVACY_ENABLE, { switch: privacySwitchValue(on) }, ctx, 0, undefined, "auto");
+  }
   if (usesHomeBasePowerPayload(ctx)) return setPayload(CAMERA_CMD.PRIVACY_MODE, { switch: on ? 0 : 1 }, ctx, 0);
   return setScalar(CAMERA_CMD.CAMERA_ENABLE, powerValue(on, ctx), ctx, "auto");
 }
@@ -483,6 +523,11 @@ function enablementReflection(
   on: boolean,
   ctx: CommandContext,
 ): { param: number; expected: boolean | number; observed: boolean } | undefined {
+  if (ridesPrivacyEnvelope(ctx)) {
+    // Written on 6250, so only 6250 can confirm it: the 1035 this family also reports never moves.
+    if (!ctx.paramIds.has(CAMERA_CMD.PRIVACY_ENABLE)) return undefined;
+    return { param: CAMERA_CMD.PRIVACY_ENABLE, expected: privacySwitchValue(on), observed: on };
+  }
   const alias = CAMERA_MEMBERS.enabled.readAliases[0].paramType;
   if (ctx.paramIds.has(alias)) return { param: alias, expected: on, observed: on };
   if (hasUnreflectedHomeBasePower(ctx)) return undefined;
@@ -535,13 +580,16 @@ export const CAMERA_MEMBERS = {
    * 1035, standalone indoor/outdoor cams under 2001 OPEN_DEVICE with direct polarity, so 2001 is a
    * read-alias. Both verified live, and the write polarity is confirmed against the app's own frames.
    *
+   * The read and the setter observe the SAME wire — see `powerCommand` — which is what makes this value
+   * track what it is told, and what lets `enablementReflection` confirm a write. The S350 family is written
+   * on 6250, so 6250 is aliased for that family only, where it is the power state. An S350 that has not
+   * reported it is named by `unreflectedMembers` instead.
+   *
    * T8410 on HomeBase 3 reports 1035 as an enable bit ("1" ⇒ ON). That reported state does not reliably
    * reflect the privacy command. `readReflectsWrite` states this distinction.
    *
-   * The privacy param (6250) is reported by the outdoor-PT family and by no other camera measured, and both
-   * of its polarities are observed. It is deliberately NOT aliased here: it moved in the same step as 1035, so
-   * the reading cannot say whether power and privacy are one state or two — so
-   * aliasing a second param could only fold two possible states into one getter for no gain.
+   * On the outdoor-PT family 6250 stays un-aliased: it moved in the same step as 1035 there, so the reading
+   * cannot say whether power and privacy are one state or two, and the app drives 1035.
    */
   enabled: {
     param: CAMERA_CMD.CAMERA_ENABLE,
@@ -550,12 +598,19 @@ export const CAMERA_MEMBERS = {
     provenance: "verified",
     invert: true,
     invertFor: (ctx) => (isT8410HomeBase3(ctx) ? false : undefined),
-    readAliases: [{ paramType: 2001, invert: false }],
-    readReflectsWrite: (ctx) => !hasUnreflectedHomeBasePower(ctx),
+    readAliases: [
+      { paramType: 2001, invert: false },
+      // The S350 family's power is its privacy switch: "0" (privacy off) ⇒ ON.
+      { paramType: CAMERA_CMD.PRIVACY_ENABLE, invert: true, available: ridesPrivacyEnvelope },
+    ],
+    // An S350 that has not reported 6250 is read from a 1035 its write never moves.
+    readReflectsWrite: (ctx) =>
+      !hasUnreflectedHomeBasePower(ctx) && (!ridesPrivacyEnvelope(ctx) || ctx.paramIds.has(CAMERA_CMD.PRIVACY_ENABLE)),
     description:
       "Camera enabled. Family-dependent wire param: 1035 CMD_DEVS_SWITCH (enable bit on T8410/HomeBase 3, " +
-      "disable bit on battery/solo cams) or 2001 OPEN_DEVICE (standalone indoor/outdoor). Reported on/off state; " +
-      "unreflectedMembers identifies commands whose effect this report does not reliably reflect.",
+      "disable bit on battery/solo cams), 2001 OPEN_DEVICE (standalone indoor/outdoor) or 6250 privacy switch " +
+      "(S350 family, privacy on = camera off). Reported on/off state; unreflectedMembers identifies commands " +
+      "whose effect this report does not reliably reflect.",
     observation: {
       event: "cameraEnabledChanged",
       reflects: (value, ctx) => enablementReflection(asBool(value), ctx),
