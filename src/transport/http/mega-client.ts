@@ -850,6 +850,23 @@ export class MegaHttpClient {
   }
 
   /**
+   * Fetch the account's devices as the `devicerelation` service lists them, `{attribute: 7, house_id}`.
+   *
+   * Each entry is `{device: {device_sn, dps, …}}`, and `dps` is the cloud's last-known value of every
+   * data point that device has reported, keyed by DP number. Answered for an account a device is shared
+   * with as well as for its owner. Sent with `category: eufy_home`, without which the service answers
+   * `10000`. `houseId` is `""` for the account-wide list.
+   */
+  getDeviceRelationList<T = unknown>(houseId: string): Promise<T> {
+    return this.post<T>(
+      "devicerelation",
+      "/app/devicerelation/get_device_list",
+      { attribute: 7, house_id: houseId },
+      { category: "eufy_home" },
+    );
+  }
+
+  /**
    * Fetch one page of a device's **cleaning history** from the mega `clean` service.
    *
    * Body is `{ device_sn, num, page }` — `num` is the page SIZE and `page` is 1-based. Returns the raw

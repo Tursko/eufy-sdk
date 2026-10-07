@@ -15,6 +15,7 @@ import {
   stationOf,
   type StationChannel,
 } from "../transport/p2p/station-channels.js";
+import { dpPointsToParams } from "../transport/mqtt/dp-codec.js";
 import { classifyDevice, type DeviceClass, type EufyDevice, type RealtimeKind } from "../core/types.js";
 import { inspectParams, resolveDevice, type Capability, type Codec, type DeviceInspection } from "../model/index.js";
 
@@ -316,6 +317,7 @@ export class DeviceRegistry {
         });
       }
     }
+    await this.mergeCloudDps(seen, bodies);
     this.lastRefreshPartial = partial;
     if (partial) for (const prev of this.devices) if (!seen.has(prev.sn)) seen.set(prev.sn, prev);
     this.devices = [...seen.values()];
@@ -408,6 +410,45 @@ export class DeviceRegistry {
       throw new Error(`device ${sn} not loaded (have: ${this.devices.map((d) => d.sn).join(", ") || "none"})`);
     }
     return dev;
+  }
+
+  /**
+   * Fill an AIoT clean-line device's params with the cloud's last-known value of each data point it has
+   * reported, from `getDeviceRelationList`'s per-device `dps`.
+   *
+   * The device list carries only some of such a device's data points, so a point the device publishes
+   * on change alone (its scene list, its schedules, its consumables) has no value until it next reports.
+   * The relation list holds every one, for an account the device is shared with as well as its owner.
+   *
+   * An id the device list already carries keeps its value, and nothing here is a realtime report: a
+   * device's own report still outranks this in {@link record}, and no last-seen time is derived from it.
+   * A failure leaves the params as the device list gave them.
+   */
+  private async mergeCloudDps(seen: Map<string, EufyDevice>, bodies: readonly object[]): Promise<void> {
+    const aiotClean = [...seen.values()].some(
+      (d) => (d.deviceClass === "vacuum" || d.deviceClass === "mower") && d.category !== "eufy_home_tuya",
+    );
+    if (!aiotClean) return;
+    for (const body of bodies) {
+      const houseId = (body as { house_id?: string }).house_id ?? "";
+      let res: { devices?: Array<{ device?: { device_sn?: string; dps?: unknown } }> };
+      try {
+        res = await this.mega.getDeviceRelationList(houseId);
+      } catch (e) {
+        if (e instanceof SessionExpiredError) throw e;
+        this.logger.debug(`[registry] device relation list unavailable: ${(e as Error)?.message ?? e}`);
+        continue;
+      }
+      for (const entry of res.devices ?? []) {
+        const dev = entry?.device?.device_sn ? seen.get(entry.device.device_sn) : undefined;
+        const dps = entry?.device?.dps;
+        if (!dev || !dps || typeof dps !== "object") continue;
+        const params = (dev.params ??= {});
+        for (const [id, value] of Object.entries(dpPointsToParams(dps as Record<string, unknown>) ?? {})) {
+          if (params[Number(id)] === undefined) params[Number(id)] = value;
+        }
+      }
+    }
   }
 
   /**

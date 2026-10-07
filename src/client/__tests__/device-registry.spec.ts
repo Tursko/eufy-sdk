@@ -6,10 +6,16 @@ import { SessionExpiredError, type MegaHttpClient } from "../../transport/http/m
  * `getDeviceParamList`). `post` is routed by path so one fake serves house-list + devs-list.
  */
 type PostFn = (service: string, path: string, body?: unknown) => Promise<any>;
-function fakeMega(opts: { post: PostFn; getDeviceParamList?: (sn: string) => Promise<any> }): MegaHttpClient {
+function fakeMega(opts: {
+  post: PostFn;
+  getDeviceParamList?: (sn: string) => Promise<any>;
+  getDeviceRelationList?: (houseId: string) => Promise<any>;
+}): MegaHttpClient {
   return {
     post: (service: string, path: string, body?: unknown) => opts.post(service, path, body),
     getDeviceParamList: (sn: string) => (opts.getDeviceParamList ?? (async () => ({})))(sn),
+    getDeviceRelationList: (houseId: string) =>
+      (opts.getDeviceRelationList ?? (async () => Promise.reject(new Error("not faked"))))(houseId),
   } as unknown as MegaHttpClient;
 }
 
@@ -574,5 +580,99 @@ describe("deviceClass — derived from the codec", () => {
 
     expect(await applianceClass(100)).toBe("other"); // inside the security id range, but not a security device
     expect(await applianceClass(99999)).toBe("other"); // outside it, hits the blanket fallback
+  });
+});
+
+describe("DeviceRegistry — a robot's cloud data points", () => {
+  /** A devs-list robot: AIoT clean line, carrying only one of its data points. */
+  const robot = (sn: string) =>
+    rawDevice(sn, {
+      device_model: "T2351",
+      category: "eufy_home",
+      device_type: undefined,
+      p2p_did: undefined,
+      params: [{ param_type: 153, param_value: "from-devs-list" }],
+    });
+  const housesAndRobot = (houseIds: string[]) => async (_s: string, path: string) =>
+    path.endsWith("get_house_list")
+      ? { house_infos: houseIds.map((house_id) => ({ house_id })) }
+      : { devices: [robot("R1")] };
+
+  it("fills the data points the device list lacks from the relation list, keeping the ones it has", async () => {
+    const asked: string[] = [];
+    const mega = fakeMega({
+      post: housesAndRobot([]),
+      getDeviceRelationList: async (houseId) => {
+        asked.push(houseId);
+        return {
+          devices: [
+            {
+              device: {
+                device_sn: "R1",
+                dps: { "153": "from-relation", "180": "c2NlbmVz", "151": true, "999": { nested: 1 } },
+              },
+            },
+          ],
+        };
+      },
+    });
+    const reg = new DeviceRegistry({ mega, onError: () => {} });
+
+    const [r1] = await reg.getDevices();
+
+    expect(asked).toEqual([""]);
+    expect(r1?.params).toEqual({ 153: "from-devs-list", 180: "c2NlbmVz", 151: "1" });
+    expect(r1?.paramUpdatedAt?.[180]).toBeUndefined();
+    expect(reg.hasRealtimeState("R1")).toBe(false);
+  });
+
+  it("asks once per house, like the device list it enriches", async () => {
+    const asked: string[] = [];
+    const mega = fakeMega({
+      post: housesAndRobot(["H1", "H2"]),
+      getDeviceRelationList: async (houseId) => (asked.push(houseId), { devices: [] }),
+    });
+
+    await new DeviceRegistry({ mega, onError: () => {} }).getDevices();
+
+    expect(asked).toEqual(["", "H1", "H2"]);
+  });
+
+  it("does not ask for an account without an AIoT robot", async () => {
+    let asked = 0;
+    const mega = fakeMega({
+      post: async (_s, path) =>
+        path.endsWith("get_house_list") ? { house_infos: [] } : { devices: [rawDevice("CAM")] },
+      getDeviceRelationList: async () => (asked++, { devices: [] }),
+    });
+
+    await new DeviceRegistry({ mega, onError: () => {} }).getDevices();
+
+    expect(asked).toBe(0);
+  });
+
+  it("keeps the device list's params when the relation list fails, without reporting an error", async () => {
+    const errors: unknown[] = [];
+    const mega = fakeMega({
+      post: housesAndRobot([]),
+      getDeviceRelationList: async () => Promise.reject(new Error("10000 Failed to request")),
+    });
+    const reg = new DeviceRegistry({ mega, onError: (e) => errors.push(e) });
+
+    const [r1] = await reg.getDevices();
+
+    expect(r1?.params).toEqual({ 153: "from-devs-list" });
+    expect(errors).toEqual([]);
+  });
+
+  it("lets a dead session through rather than serving the device list as current", async () => {
+    const mega = fakeMega({
+      post: housesAndRobot([]),
+      getDeviceRelationList: async () => Promise.reject(new SessionExpiredError("expired")),
+    });
+
+    await expect(new DeviceRegistry({ mega, onError: () => {} }).getDevices()).rejects.toBeInstanceOf(
+      SessionExpiredError,
+    );
   });
 });
