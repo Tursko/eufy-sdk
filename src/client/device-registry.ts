@@ -23,7 +23,10 @@ export interface DeviceRecord {
   deviceType?: number;
   model?: string;
   category?: string;
-  /** The app-shown device name (`device_name`); see {@link CloudRecord.name}. */
+  /**
+   * The app-shown device name: `alias_name` first on a vacuum or mower, `device_name` first otherwise;
+   * see {@link CloudRecord.name}.
+   */
   name?: string;
   /** Parent HomeBase serial when attached (topology signal; see {@link CloudRecord.parentSn}). */
   parentSn?: string;
@@ -160,13 +163,8 @@ function deviceClassOf(codec: Codec, realtime: RealtimeKind): DeviceClass {
 }
 
 /**
- * The name the user gave a unit, from a `get_devs_list` record.
- *
- * On the clean line (vacuum, mower) `device_name` carries the product's default label ("RoboVac") and
- * the user's own name for the unit rides in `alias_name`, so the alias is read first there. This field
- * order is the one a working eufy Clean client uses against the same `get_devs_list` endpoint, and it
- * matches the observed symptom: every robot on an account listed under the default label. Every other
- * line keeps `device_name` first, which is where a camera's user-set name is observed.
+ * On vacuum and mower records `device_name` holds the product label and `alias_name` holds the user's name,
+ * so the alias is read first; every other class reads `device_name` first.
  */
 function recordName(raw: any, deviceClass: DeviceClass): string | undefined {
   if (deviceClass === "vacuum" || deviceClass === "mower") {

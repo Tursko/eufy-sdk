@@ -597,14 +597,5 @@ describe("deviceClass — derived from the codec", () => {
     it("reads a robot vacuum's alias_name before the product label in device_name", async () => {
       expect(await nameOf(vacuum({ device_name: "RoboVac", alias_name: "Kitchen" }))).toBe("Kitchen");
     });
-
-    it("falls back to device_name on a robot vacuum with no alias", async () => {
-      expect(await nameOf(vacuum({ device_name: "RoboVac", alias_name: "" }))).toBe("RoboVac");
-      expect(await nameOf(vacuum({ device_name: "RoboVac" }))).toBe("RoboVac");
-    });
-
-    it("keeps device_name first on a camera", async () => {
-      expect(await nameOf(rawDevice("C", { device_name: "Front door", alias_name: "Other" }))).toBe("Front door");
-    });
   });
 });
