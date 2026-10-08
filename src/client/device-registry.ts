@@ -15,7 +15,7 @@ import {
   stationOf,
   type StationChannel,
 } from "../transport/p2p/station-channels.js";
-import { dpPointsToParams } from "../transport/mqtt/dp-codec.js";
+import { parseAiotDpReport } from "../transport/mqtt/dp-codec.js";
 import { classifyDevice, type DeviceClass, type EufyDevice, type RealtimeKind } from "../core/types.js";
 import { inspectParams, resolveDevice, type Capability, type Codec, type DeviceInspection } from "../model/index.js";
 
@@ -202,6 +202,8 @@ export class DeviceRegistry {
   private overlayRefusalReported = false;
   /** Per-serial capability cache for {@link capabilitiesForDevice}; `null` = negative hit. */
   private readonly deviceCapsCache = new Map<string, ReadonlySet<Capability> | null>();
+  /** Per-serial cloud data points of an AIoT robot, joined beneath the params in {@link record} — see {@link loadCloudDps}. */
+  private readonly cloudDps = new Map<string, Record<number, string>>();
   /** Per-serial realtime state, keyed by param id in the device's own namespace (see {@link DeviceRecord.dpParams}). */
   private readonly dpParams = new Map<string, Record<number, string>>();
   /** Callers blocked in {@link awaitRealtimeState}, released by the device's first report. */
@@ -317,7 +319,7 @@ export class DeviceRegistry {
         });
       }
     }
-    await this.mergeCloudDps(seen, bodies);
+    await this.loadCloudDps(seen);
     this.lastRefreshPartial = partial;
     if (partial) for (const prev of this.devices) if (!seen.has(prev.sn)) seen.set(prev.sn, prev);
     this.devices = [...seen.values()];
@@ -413,47 +415,40 @@ export class DeviceRegistry {
   }
 
   /**
-   * Fill an AIoT clean-line device's params with the cloud's last-known value of each data point it has
-   * reported, from `getDeviceRelationList`'s per-device `dps`.
+   * Hold an AIoT robot's cloud data points: the cloud's last-known value of each one it has reported,
+   * from `getDeviceRelationList`'s per-device `dps`.
    *
-   * The device list carries only some of such a device's data points, so a point the device publishes
-   * on change alone (its scene list, its schedules, its consumables) has no value until it next reports.
-   * The relation list holds every one, for an account the device is shared with as well as its owner.
+   * The device list carries only some of a robot's data points, so a point the robot publishes on change
+   * alone (its scene list, its schedules, its consumables) has no value until it next reports. The
+   * relation list holds every one, for an account the robot is shared with as well as its owner.
    *
-   * An id the device list already carries keeps its value, and nothing here is a realtime report: a
-   * device's own report still outranks this in {@link record}, and no last-seen time is derived from it.
-   * A failure leaves the params as the device list gave them.
+   * Kept apart from the device list's params rather than merged into them: those are what a poll diffs,
+   * and a diff retires the realtime report for that id, so a cloud value lagging the robot's last report
+   * would replace it. {@link record} joins this beneath both halves. A failure keeps what was held.
    */
-  private async mergeCloudDps(seen: Map<string, EufyDevice>, bodies: readonly object[]): Promise<void> {
-    const aiotClean = [...seen.values()].some(
-      (d) => (d.deviceClass === "vacuum" || d.deviceClass === "mower") && d.category !== "eufy_home_tuya",
-    );
-    if (!aiotClean) return;
-    for (const body of bodies) {
-      const houseId = (body as { house_id?: string }).house_id ?? "";
-      let res: { devices?: Array<{ device?: { device_sn?: string; dps?: unknown } }> };
-      try {
-        res = await this.mega.getDeviceRelationList(houseId);
-      } catch (e) {
-        if (e instanceof SessionExpiredError) throw e;
-        this.logger.debug(`[registry] device relation list unavailable: ${(e as Error)?.message ?? e}`);
-        continue;
-      }
-      for (const entry of res.devices ?? []) {
-        const dev = entry?.device?.device_sn ? seen.get(entry.device.device_sn) : undefined;
-        const dps = entry?.device?.dps;
-        if (!dev || !dps || typeof dps !== "object") continue;
-        const params = (dev.params ??= {});
-        for (const [id, value] of Object.entries(dpPointsToParams(dps as Record<string, unknown>) ?? {})) {
-          if (params[Number(id)] === undefined) params[Number(id)] = value;
-        }
-      }
+  private async loadCloudDps(seen: Map<string, EufyDevice>): Promise<void> {
+    const robots = [...seen.values()].filter((d) => d.deviceClass === "vacuum" && d.category !== "eufy_home_tuya");
+    if (!robots.length) return;
+    let res: { devices?: Array<{ device?: { device_sn?: string; dps?: unknown } }> };
+    try {
+      res = await this.mega.getDeviceRelationList();
+    } catch (e) {
+      if (e instanceof SessionExpiredError) throw e;
+      this.logger.debug(`[registry] device relation list unavailable: ${(e as Error)?.message ?? e}`);
+      return;
+    }
+    const wanted = new Set(robots.map((d) => d.sn));
+    for (const entry of res.devices ?? []) {
+      const sn = entry?.device?.device_sn;
+      const dps = parseAiotDpReport({ payload: entry?.device?.dps });
+      if (sn && wanted.has(sn) && dps) this.cloudDps.set(sn, dps);
     }
   }
 
   /**
    * Resolve a serial to a {@link DeviceRecord} with current params: starts from the device-list params, then
-   * overlays a fresh `get_device_param_list` when that call is available to this account.
+   * overlays a fresh `get_device_param_list` when that call is available to this account. An AIoT robot's
+   * cloud data points ({@link loadCloudDps}) sit beneath both, filling only ids neither carries.
    *
    * The overlay is **owner-gated** — a shared or member account is refused it for every device, permanently,
    * which {@link OWNER_ONLY_CODE} identifies — so when it is unavailable the device list is the source
@@ -481,7 +476,7 @@ export class DeviceRegistry {
     let dev = this.devices.find((d) => d.sn === sn);
     if (!dev) throw new Error(`device ${sn} not found (have: ${this.devices.map((d) => d.sn).join(", ")})`);
 
-    const params: Record<number, string> = { ...(dev.params ?? {}) };
+    const params: Record<number, string> = { ...this.cloudDps.get(sn), ...(dev.params ?? {}) };
     const paramUpdatedAt: Record<number, number> = { ...(dev.paramUpdatedAt ?? {}) };
     if (!this.overlayRefused.has(sn)) {
       try {

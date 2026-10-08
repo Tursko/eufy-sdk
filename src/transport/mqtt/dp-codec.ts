@@ -182,15 +182,7 @@ export function parseAiotDpReport(raw: unknown): Record<number, string> | undefi
 
   const data = payload.data;
   const points = data && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : payload;
-  return dpPointsToParams(points);
-}
 
-/**
- * Normalize a data-point map keyed by DP number to the param shape device state is held in: numeric ids,
- * every value as a string, a boolean as `"1"`/`"0"`. Envelope keys and nested values are skipped. A
- * structured point stays the base64 its device sent, uninterpreted. `undefined` when nothing remains.
- */
-export function dpPointsToParams(points: Record<string, unknown>): Record<number, string> | undefined {
   const out: Record<number, string> = {};
   for (const [key, value] of Object.entries(points)) {
     if (AIOT_META_KEYS.has(key)) continue;
