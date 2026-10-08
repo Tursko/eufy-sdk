@@ -375,9 +375,19 @@ recording.
 present only on a camera that reported a speaker, so guard it like the other optional media methods
 (the snippets below assert it once with `!` rather than repeating the guard on each line).
 
-Audio must be **AAC-LC, 16 kHz, mono, in ADTS frames** — the device's path is fixed at those
-parameters, so anything else is rejected rather than resampled (it would play at the wrong pitch and
-speed). Chunk boundaries don't matter; frames are recovered from the stream.
+The handle says which codec the speaker plays: `talk.codec`. It is `aac-eld` on a T8410C that
+sends `aac-eld`, and `aac-lc` on every other camera, including another model that sends
+`aac-eld`, whose speaker codec is not evidenced.
+
+- `aac-lc`: **AAC-LC, 16 kHz, mono, in ADTS frames**, through `write()` / `writable()`. Chunk
+  boundaries don't matter; frames are recovered from the stream.
+- `aac-eld`: one raw AAC-ELD access unit with LD-SBR (16 kHz, mono, 512 samples) per `write()`, or
+  per write to `writable()`, which is object-mode for this codec. A T8410C that sends `aac-eld`
+  does not play `aac-lc`.
+
+An `aac-lc` stream at another rate or channel count is rejected with an `error` rather than
+resampled (it would play at the wrong pitch and speed, or not at all). An `aac-eld` unit longer
+than the device accepts is refused with an `error`.
 
 ```ts
 const talk = await cam?.talkback?.();
@@ -386,6 +396,15 @@ if (!talk) return; // this camera has no two-way audio
 talk.on("error", (err) => console.error(err.message));
 talk.on("finished", () => void talk.stop());
 fs.createReadStream("greeting.aac").pipe(talk.writable());
+```
+
+For a camera whose speaker plays `aac-eld`, write access units instead:
+
+<!-- typecheck: host accessUnit -->
+
+```ts
+const talk = await cam?.talkback?.();
+if (talk?.codec === "aac-eld") talk.write(accessUnit);
 ```
 
 Producing a suitable file with ffmpeg:
@@ -399,17 +418,17 @@ about 32 kbps an encoder will occasionally emit one that exceeds it; those frame
 `error` rather than sent, so a higher bitrate quietly costs you audio instead of buying quality. The
 path is 16 kHz mono speech — there is nothing above 32 kbps to gain.
 
-Frames are **paced** at their own playback rate (64 ms each) rather than flushed as fast as they
-arrive, so piping a file plays it at speed instead of overrunning the device. `talk.pending` reports
-what is still waiting, and `writable()` applies backpressure at the queue's high-water mark, so a fast
-source cannot buffer a whole clip in memory. A realtime source (a live mic) simply keeps the queue
-near-empty and never hits that mark.
+Frames are **paced** at their own playback rate (64 ms for `aac-lc`, 32 ms for `aac-eld`) rather
+than flushed as fast as they arrive, so piping a file plays it at speed instead of overrunning the
+device. `talk.pending` reports what is still waiting, and `writable()` applies backpressure at the
+queue's high-water mark, so a fast source cannot buffer a whole clip in memory. A realtime source (a
+live mic) simply keeps the queue near-empty and never hits that mark.
 
 `finished` is the completion signal: it fires once, when the input has ended **and** everything queued
 has reached the wire. Ending the input is what `writable()`'s `final` does for you; an imperative
 `write()` caller calls `talk.end()` instead. Note that `finished` deliberately does not mean "the queue
 is momentarily empty" — a realtime source empties the queue after every single frame, so stopping on
-that would cut the clip to 64 ms.
+that would cut the clip to one frame.
 
 `stop()` closes the path and **drops** anything still queued — wait for `finished` if you want the clip
 played out. A talkback that goes quiet (nothing written, nothing queued) closes itself after 30 s, so a
