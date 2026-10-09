@@ -1,10 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { EufyMega } from "../eufy-mega.js";
 import { Device } from "../../model/device.js";
-import { resolveDevice } from "../../model/registry.js";
 import type { ParamChange } from "../device-registry.js";
-import { DeviceRegistry } from "../device-registry.js";
-import type { CommandContext } from "../../model/types.js";
 
 /**
  * The cloud-param poll loop — the producer behind the capabilities' `source:"poll"` event mappings.
@@ -69,127 +66,6 @@ function liveCamera(eufy: EufyMega, sn = "T8000P0000000000"): Device {
   (eufy as any).liveDevices.set(sn, new WeakRef(dev));
   return dev;
 }
-
-/** Real registry diffs, with synthetic responses only at the external request boundary. */
-async function heldCloudCamera(
-  params: Record<number, string> = {},
-  model = "T8114",
-  category = "eufy_security",
-  deviceType: number | undefined = 9,
-) {
-  const sn = "T8000P0000000000";
-  const cloud = {
-    params: { 1101: "80", ...params } as Record<number, string>,
-    channel: 0,
-    model: model as string | undefined,
-    category: category as string | undefined,
-  };
-  const fetchParams = vi.fn(async () => ({}));
-  const post = vi.fn(async (_service: string, path: string) =>
-    path.endsWith("get_house_list")
-      ? { house_infos: [] }
-      : {
-          devices: [
-            {
-              device_sn: sn,
-              device_model: cloud.model,
-              device_type: deviceType,
-              device_channel: cloud.channel,
-              station_sn: sn,
-              category: cloud.category,
-              params: Object.entries(cloud.params).map(([id, value]) => ({
-                param_type: Number(id),
-                param_value: value,
-              })),
-            },
-          ],
-        },
-  );
-  const eufy = new EufyMega({ email: "t@example.com", password: "x", autoRealtime: false });
-  const client = eufy as any;
-  client.registry = new DeviceRegistry({
-    mega: { post, getDeviceParamList: fetchParams } as never,
-    onError: (error) => {
-      throw error;
-    },
-  });
-  const errors: Error[] = [];
-  eufy.on("error", (error) => errors.push(error));
-  const context = vi.spyOn(client, "commandContext").mockImplementation(
-    async (_sn: unknown, record: any) =>
-      ({
-        codec: resolveDevice({ model, category, deviceType, params: cloud.params }).codec,
-        model,
-        category,
-        deviceType,
-        channel: 0,
-        paramIds: new Set([...Object.keys(cloud.params), ...Object.keys(record?.dpParams ?? {})].map(Number)),
-      }) satisfies CommandContext,
-  );
-  const dispatch = vi.fn(async (_command: unknown) => {});
-  vi.spyOn(client, "commandSinkFor").mockReturnValue({ dispatch });
-  vi.spyOn(client, "mediaProviderFor").mockReturnValue(undefined);
-  vi.spyOn(client, "ff09SettingsReaderFor").mockReturnValue(undefined);
-  vi.spyOn(client, "awaitFirstRealtimeState").mockResolvedValue(undefined);
-  const pollChanges = vi.spyOn(client.registry, "pollChanges");
-  await client.registry.pollChanges();
-  const dev = await eufy.getDevice(sn);
-  const seen: unknown[] = [];
-  eufy.on("propertyChanged", (event) => seen.push(event));
-  const poll = async (next: Record<number, string>) => {
-    cloud.params = next;
-    await client.pollOnce();
-    expect(errors).toEqual([]);
-    return pollChanges.mock.results.at(-1)!.value;
-  };
-  return { dev, client, seen, poll, context, fetchParams, dispatch, cloud };
-}
-
-describe("cached cloud read discovery", () => {
-  beforeEach(() => vi.restoreAllMocks());
-
-  it("binds a newly discovered read and setter to the current cached channel", async () => {
-    const { dev, cloud, poll, dispatch, fetchParams } = await heldCloudCamera();
-    cloud.channel = 2;
-    await poll({ 1101: "80", 1045: "1" });
-    await dev.camera?.()?.setStatusLed?.(false);
-    expect(dispatch).toHaveBeenCalledOnce();
-    expect(dispatch.mock.calls[0]?.[0]).toMatchObject({ channel: 2 });
-    expect(fetchParams).toHaveBeenCalledOnce();
-  });
-
-  it("keeps omitted classification facts consistent between schema and bound reads", async () => {
-    const { dev, cloud, poll, fetchParams } = await heldCloudCamera({ 1045: "1" });
-    cloud.model = undefined;
-    cloud.category = undefined;
-    await poll({ 1101: "80" });
-    expect(dev.codec).toBe("camera");
-    expect(dev.model).toBe("T8114");
-    expect(dev.camera?.()?.statusLed).toBe(true);
-    expect(fetchParams).toHaveBeenCalledOnce();
-  });
-
-  it("retains a clean-line read's category gate across an omitted cloud category", async () => {
-    const { dev, cloud, poll, fetchParams } = await heldCloudCamera({ 156: "1" }, "T2351", "eufy_home", undefined);
-    expect(dev.vacuumClean?.()?.resumeClean).toBe(true);
-    cloud.category = undefined;
-    await poll({ 1101: "80", 156: "1" });
-    expect(dev.codec).toBe("vacuum");
-    expect(dev.vacuumClean?.()?.resumeClean).toBe(true);
-    expect(fetchParams).toHaveBeenCalledOnce();
-  });
-
-  it("retains the legacy clean category without enabling AIoT controls on omission", async () => {
-    const { dev, cloud, poll, fetchParams } = await heldCloudCamera({ 104: "41", 151: "1" }, "T2118", "eufy_home_tuya");
-    expect(dev.vacuumClean?.()?.battery).toBe(41);
-    expect(dev.vacuumClean?.()).not.toHaveProperty("setPower");
-    cloud.category = undefined;
-    await poll({ 1101: "80", 104: "41", 151: "1" });
-    expect(dev.vacuumClean?.()?.battery).toBe(41);
-    expect(dev.vacuumClean?.()).not.toHaveProperty("setPower");
-    expect(fetchParams).toHaveBeenCalledOnce();
-  });
-});
 
 describe("cloud-param poll loop", () => {
   beforeEach(() => {

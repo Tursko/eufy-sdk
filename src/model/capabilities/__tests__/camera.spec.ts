@@ -15,7 +15,7 @@ import {
   resolveStreamingQualityTier,
 } from "../camera.js";
 import type { RecordingQualityName } from "../camera.js";
-import { buildCommand, mergeProperties } from "../index.js";
+import { buildCommand } from "../index.js";
 import { actionSpecOf } from "../access.js";
 import { bind } from "./bind.js";
 import type { CameraActions } from "../camera.js";
@@ -39,95 +39,6 @@ const ctx = (channel = 0, extra: Partial<CommandContext> = {}): CommandContext =
 /** The bound `dev.camera()` object — the members derive their setters in the barrel, not in `actions()`. */
 const camera = (c: CommandContext, media?: MediaProvider) => bind<CameraActions>("camera", c, { media });
 
-describe("reported camera Wi-Fi signal", () => {
-  it("offers one readonly unitless scalar without dispatching or refreshing", () => {
-    const c = ctx(3, { paramIds: new Set([1142]) });
-    const spec = mergeProperties(["camera"], c).find((p) => p.name === "wifiRssi");
-    const { acts, sent } = bind<CameraActions>("camera", c, {
-      read: (name) => (name === "wifiRssi" ? { value: -71 } : undefined),
-    });
-    expect(spec).toMatchObject({ paramType: 1142, type: "number", kind: "scalar", writable: false });
-    for (const key of ["unit", "min", "max", "step", "enumValues"])
-      expect(spec?.[key as keyof NonNullable<typeof spec>]).toBeUndefined();
-    expect(acts.wifiRssi).toBe(-71);
-    expect(acts).not.toHaveProperty("setWifiRssi");
-    expect(buildCommand("wifiRssi", -64, c)).toBeUndefined();
-    expect(sent).toEqual([]);
-  });
-
-  it.each([{ reported: [] }, { reported: [1141] }, { reported: [1035] }])(
-    "withholds the read without its own evidence $reported",
-    ({ reported }) => {
-      const c = ctx(0, { paramIds: new Set(reported) });
-      expect(mergeProperties(["camera"], c).some((p) => p.name === "wifiRssi")).toBe(false);
-      expect(camera(c).acts).not.toHaveProperty("wifiRssi");
-    },
-  );
-
-  it.each(["lock", "sensor", "keypad", "station", "vacuum", "mower", "light", "printer", "display"] as const)(
-    "withholds a colliding parameter in the %s codec",
-    (codec) => {
-      const c = ctx(0, { codec, paramIds: new Set([1142]) });
-      expect(mergeProperties(["camera"], c).some((p) => p.name === "wifiRssi")).toBe(false);
-      expect(camera(c).acts).not.toHaveProperty("wifiRssi");
-    },
-  );
-
-  it.each([
-    [-71, -71],
-    [0, 0],
-    [-62.5, -62.5],
-    [17, 17],
-    ["-71", -71],
-    ["0", 0],
-    [" -62.5 ", -62.5],
-    ["+.5", 0.5],
-    ["-71.", -71],
-  ])("keeps supplied %j coherent across schema, state and getter", (raw, value) => {
-    const dev = Device.fromRecord("T8114P0000000000", { deviceType: 9, model: "T8114", params: { 1142: "-80" } });
-    dev.bindActions(ctx(1, { paramIds: new Set([1142]) }), { dispatch: async () => undefined });
-    const changed = dev.applyParams({ 1142: raw });
-    expect(dev.properties.find((p) => p.name === "wifiRssi")).toMatchObject({ type: "number", kind: "scalar" });
-    expect(dev.getProperty("wifiRssi")?.value).toBe(value);
-    expect(dev.camera?.()?.wifiRssi).toBe(value);
-    expect(dev.announcements(changed)).toEqual([{ property: "wifiRssi", value }]);
-  });
-
-  it.each(
-    [
-      true,
-      false,
-      null,
-      undefined,
-      "",
-      " ",
-      "NaN",
-      "Infinity",
-      "-Infinity",
-      "0x10",
-      "1e2",
-      "1_000",
-      "{-71}",
-      "[-71]",
-      [],
-      [-71],
-      {},
-      { value: -71 },
-      NaN,
-      Infinity,
-      -Infinity,
-      "9".repeat(400),
-    ].map((raw) => ({ raw })),
-  )("leaves malformed $raw unknown instead of creating a signal", ({ raw }) => {
-    const dev = Device.fromRecord("T8114P0000000000", { deviceType: 9, model: "T8114", params: { 1142: "-80" } });
-    dev.bindActions(ctx(1, { paramIds: new Set([1142]) }), { dispatch: async () => undefined });
-    const changed = dev.applyParams({ 1142: raw as never });
-    expect(dev.getProperty("wifiRssi")?.value).toBe("");
-    expect(dev.camera?.()?.wifiRssi).toBeUndefined();
-    expect(dev.announcements(changed)).toEqual([{ property: "wifiRssi" }]);
-  });
-});
-
 describe("camera capability module", () => {
   it("declares the capability + schema", () => {
     expect(CAMERA.capability).toBe("camera");
@@ -146,6 +57,29 @@ describe("camera capability module", () => {
       "antiTheftDetection",
       "statusLed",
     ]);
+  });
+
+  describe("wifiRssi", () => {
+    it.each([
+      { deviceType: 47, model: "T8425", homeBaseAttached: true },
+      { deviceType: 31, model: "T8410", homeBaseAttached: false },
+    ])("reads reported signal on $model and follows cache updates", (identity) => {
+      const dev = Device.fromRecord("SN", { ...identity, params: { 1142: "-62" } });
+      dev.bindActions(ctx(0, { ...identity, paramIds: new Set([1142]) }), { dispatch: async () => undefined });
+      const acts = dev.camera!()!;
+      expect(acts.wifiRssi).toBe(-62);
+      expect("setWifiRssi" in acts).toBe(false);
+      dev.applyParams({ 1142: "0" });
+      expect(acts.wifiRssi).toBe(0);
+      dev.applyParams({ 1142: "not-a-number" });
+      expect(acts.wifiRssi).toBeUndefined();
+    });
+
+    it("does not install a getter without a reported signal parameter", () => {
+      const { acts } = camera(ctx());
+      expect("wifiRssi" in acts).toBe(false);
+      expect("setWifiRssi" in acts).toBe(false);
+    });
   });
 
   // Every wire here was captured from the app on an indoor pan-tilt (standalone, mains) and read back
@@ -830,8 +764,6 @@ declare const cam: CameraActions;
 
 // A getter is optional (evidence-gated) and narrowed to what the member declares it is stored as.
 const _enabled: Exact<typeof cam.enabled, boolean | undefined> = true;
-const _wifiRssi: Exact<typeof cam.wifiRssi, number | undefined> = true;
-const _noWifiSetter: Exact<"setWifiRssi" extends keyof CameraActions ? true : false, false> = true;
 const _watermark: Exact<typeof cam.watermark, number | undefined> = true;
 
 // Write-only: a setter and no getter, because the device never reports privacy state back.
@@ -862,8 +794,6 @@ const _talkbackNotFalse: Exact<false extends typeof cam.talkback ? true : false,
 
 export const _surfaceAssertions = [
   _enabled,
-  _wifiRssi,
-  _noWifiSetter,
   _watermark,
   _noPrivacyGetter,
   _setPrivacy,

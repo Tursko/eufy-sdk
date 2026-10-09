@@ -15,6 +15,8 @@ import { CameraDisabledError, type Command, type MediaProvider } from "../../cor
  * `transport/p2p/commands.ts`). Each entry notes its app `CommandType` name.
  */
 export const CAMERA_CMD = {
+  /** Camera-reported Wi-Fi signal (app `CMD_GET_WIFI_RSSI`). */
+  WIFI_RSSI: 1142,
   /** Camera on/off. Read and write polarity depend on the family and topology. */
   CAMERA_ENABLE: 1035,
   /** Wrapped T8410 power switch on HomeBase 3. */
@@ -504,14 +506,6 @@ function refuseWhenDisabled(ctx: CommandContext, read: (name: string) => { value
     throw new CameraDisabledError(ctx.name ?? ctx.serial);
 }
 
-/** Finite signal numbers and decimal strings; other reports remain nonnumeric. */
-function coerceWifiRssi(raw: unknown): number | "" {
-  if (typeof raw === "number") return Number.isFinite(raw) ? raw : "";
-  if (typeof raw !== "string" || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw.trim())) return "";
-  const value = Number(raw);
-  return Number.isFinite(value) ? value : "";
-}
-
 /**
  * Every `camera` feature, declared once. The property schema, the typed getters, the derived setters,
  * the intent routes, the media methods and the descriptions all come out of this table.
@@ -529,13 +523,11 @@ function coerceWifiRssi(raw: unknown): number | "" {
 export const CAMERA_MEMBERS = {
   /** Camera-reported Wi-Fi signal; physical units and a quality scale are unspecified. */
   wifiRssi: {
-    param: 1142,
+    param: CAMERA_CMD.WIFI_RSSI,
     type: "number",
     kind: "scalar",
     provenance: "apk",
-    available: (ctx: AvailabilityContext) => ctx.codec === "camera" && ctx.paramIds?.has(1142) === true,
-    coerce: coerceWifiRssi,
-    description: "Reported Wi-Fi signal value, without an inferred unit or quality scale.",
+    description: "Camera-reported Wi-Fi signal; physical units and a quality scale are unspecified.",
   },
   /**
    * The default READ is the *disable*-bit convention (1035 "0" ⇒ ON, 2001 direct); the WRITE polarity is
