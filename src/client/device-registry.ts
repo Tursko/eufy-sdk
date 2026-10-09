@@ -178,6 +178,13 @@ export interface DeviceRegistryDeps {
  */
 const LIST_REUSE_MS = 5_000;
 
+/**
+ * The robot models whose `getDeviceRelationList` `dps` are checked to be keyed by the DP numbers their
+ * realtime reports use: a T2351's answer carried points 150–180, DP 180 in the same `SceneResponse` its
+ * MQTT reports send.
+ */
+const CLOUD_DPS_MODELS: ReadonlySet<string> = new Set(["T2351"]);
+
 export class DeviceRegistry {
   private readonly mega: MegaHttpClient;
   private readonly onError: (e: unknown) => void;
@@ -425,9 +432,12 @@ export class DeviceRegistry {
    * Kept apart from the device list's params rather than merged into them: those are what a poll diffs,
    * and a diff retires the realtime report for that id, so a cloud value lagging the robot's last report
    * would replace it. {@link record} joins this beneath both halves. A failure keeps what was held.
+   *
+   * Limited to {@link CLOUD_DPS_MODELS}, the models whose relation-list `dps` are checked to carry the
+   * DP numbers their realtime reports use.
    */
   private async loadCloudDps(seen: Map<string, EufyDevice>): Promise<void> {
-    const robots = [...seen.values()].filter((d) => d.deviceClass === "vacuum" && d.category !== "eufy_home_tuya");
+    const robots = [...seen.values()].filter((d) => CLOUD_DPS_MODELS.has(d.model ?? ""));
     if (!robots.length) return;
     let res: { devices?: Array<{ device?: { device_sn?: string; dps?: unknown } }> };
     try {
