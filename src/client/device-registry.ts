@@ -24,7 +24,10 @@ export interface DeviceRecord {
   deviceType?: number;
   model?: string;
   category?: string;
-  /** The app-shown device name (`device_name`); see {@link CloudRecord.name}. */
+  /**
+   * The app-shown device name: `alias_name` first on a vacuum, `device_name` first otherwise;
+   * see {@link CloudRecord.name}.
+   */
   name?: string;
   /** Parent HomeBase serial when attached (topology signal; see {@link CloudRecord.parentSn}). */
   parentSn?: string;
@@ -158,6 +161,17 @@ const CLASS_BY_CODEC: Record<Codec, DeviceClass> = {
 function deviceClassOf(codec: Codec, realtime: RealtimeKind): DeviceClass {
   const cls = CLASS_BY_CODEC[codec];
   return cls === "camera" && realtime !== "p2p" ? "other" : cls;
+}
+
+/**
+ * On vacuum records `device_name` holds the product label and `alias_name` holds the user's name, so the
+ * alias is read first; every other class reads `device_name` first.
+ */
+function recordName(raw: any, deviceClass: DeviceClass): string | undefined {
+  if (deviceClass === "vacuum") {
+    return raw.alias_name || raw.device_alias_name || raw.device_name || undefined;
+  }
+  return raw.device_name ?? raw.device_alias_name ?? raw.alias_name;
 }
 
 export interface DeviceRegistryDeps {
@@ -311,9 +325,10 @@ export class DeviceRegistry {
           category: raw.category,
           params,
         }).codec;
+        const deviceClass = deviceClassOf(codec, c.realtime);
         seen.set(raw.device_sn, {
           sn: raw.device_sn,
-          name: raw.device_name ?? raw.device_alias_name ?? raw.alias_name,
+          name: recordName(raw, deviceClass),
           model: raw.device_model,
           stationSn: resolvedStationSn(raw, raw.device_sn),
           p2pDid: raw.p2p_did,
@@ -321,7 +336,7 @@ export class DeviceRegistry {
           paramUpdatedAt,
           lastSeenMs: lastSeenMsOf(paramUpdatedAt),
           raw,
-          deviceClass: deviceClassOf(codec, c.realtime),
+          deviceClass,
           ...c,
         });
       }

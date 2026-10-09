@@ -580,6 +580,29 @@ describe("deviceClass — derived from the codec", () => {
     expect(await applianceClass(100)).toBe("other"); // inside the security id range, but not a security device
     expect(await applianceClass(99999)).toBe("other"); // outside it, hits the blanket fallback
   });
+
+  describe("getDevices — the user's name for a unit", () => {
+    const vacuum = (extra: Record<string, unknown>) =>
+      rawDevice("V", {
+        device_model: "T2351",
+        category: "eufy_home",
+        p2p_did: undefined,
+        device_type: undefined,
+        params: [],
+        ...extra,
+      });
+    async function nameOf(record: Record<string, unknown>): Promise<string | undefined> {
+      const mega = fakeMega({
+        post: async (_s, path) => (path.endsWith("get_house_list") ? { house_infos: [] } : { devices: [record] }),
+      });
+      const [dev] = await new DeviceRegistry({ mega, onError: () => {} }).getDevices();
+      return dev?.name;
+    }
+
+    it("reads a robot vacuum's alias_name before the product label in device_name", async () => {
+      expect(await nameOf(vacuum({ device_name: "RoboVac", alias_name: "Kitchen" }))).toBe("Kitchen");
+    });
+  });
 });
 
 describe("DeviceRegistry — a robot's cloud data points", () => {
