@@ -24,7 +24,7 @@ export interface DeviceRecord {
   model?: string;
   category?: string;
   /**
-   * The app-shown device name: `alias_name` first on a vacuum or mower, `device_name` first otherwise;
+   * The app-shown device name: `alias_name` first on a vacuum, `device_name` first otherwise;
    * see {@link CloudRecord.name}.
    */
   name?: string;
@@ -163,11 +163,11 @@ function deviceClassOf(codec: Codec, realtime: RealtimeKind): DeviceClass {
 }
 
 /**
- * On vacuum and mower records `device_name` holds the product label and `alias_name` holds the user's name,
- * so the alias is read first; every other class reads `device_name` first.
+ * On vacuum records `device_name` holds the product label and `alias_name` holds the user's name, so the
+ * alias is read first; every other class reads `device_name` first.
  */
 function recordName(raw: any, deviceClass: DeviceClass): string | undefined {
-  if (deviceClass === "vacuum" || deviceClass === "mower") {
+  if (deviceClass === "vacuum") {
     return raw.alias_name || raw.device_alias_name || raw.device_name || undefined;
   }
   return raw.device_name ?? raw.device_alias_name ?? raw.alias_name;
