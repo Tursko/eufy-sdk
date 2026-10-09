@@ -54,10 +54,7 @@ export const MODEL_REGISTRY: Readonly<Record<string, RegistryEntry>> = {
   T8210: { codec: "camera", caps: ["doorbell", "battery"], name: "Video Doorbell" },
   // Confirmed against a real owned unit (named "Doorbell"): Video Doorbell Dual.
   T8214: { codec: "camera", caps: ["doorbell", "battery"], name: "Video Doorbell Dual" },
-  // Reported by two users (ha-eufy-sdk#38, ha-eufy-sdk-addon#41): the battery Video Doorbell Dual on a
-  // HomeBase, vendor deviceType 91 (BATTERY_DOORBELL_PLUS). Without this row its name stayed the raw
-  // T-code, so the `/doorbell/i` model hint never matched: its presses reached the host but no doorbell
-  // capability, event entity or ring trigger was built.
+  // Battery Video Doorbell Dual, vendor deviceType 91 (BATTERY_DOORBELL_PLUS), reported by two users.
   T8213: { codec: "camera", caps: ["doorbell", "battery"], name: "Video Doorbell Dual" },
   // Confirmed against a real owned unit: the mains-powered Wired Doorbell 2K. No `battery` row
   // member on purpose — this model is wired, so the codec baseline plus inference is the whole
