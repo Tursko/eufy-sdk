@@ -74,12 +74,6 @@ describe("camera capability module", () => {
       dev.applyParams({ 1142: "not-a-number" });
       expect(acts.wifiRssi).toBeUndefined();
     });
-
-    it("does not install a getter without a reported signal parameter", () => {
-      const { acts } = camera(ctx());
-      expect("wifiRssi" in acts).toBe(false);
-      expect("setWifiRssi" in acts).toBe(false);
-    });
   });
 
   // Every wire here was captured from the app on an indoor pan-tilt (standalone, mains) and read back

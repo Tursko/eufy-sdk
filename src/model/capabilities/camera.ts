@@ -521,7 +521,7 @@ function refuseWhenDisabled(ctx: CommandContext, read: (name: string) => { value
  * @internal
  */
 export const CAMERA_MEMBERS = {
-  /** Camera-reported Wi-Fi signal; physical units and a quality scale are unspecified. */
+  /** Reads the latest cached report and exposes no setter. */
   wifiRssi: {
     param: CAMERA_CMD.WIFI_RSSI,
     type: "number",
