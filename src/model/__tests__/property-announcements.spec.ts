@@ -30,6 +30,14 @@ const camera: CloudRecord = { deviceType: 9, model: "T8114", params: { 1101: "50
 const announce = (dev: Device, params: Record<number, string>) => dev.announcements(dev.applyParams(params));
 
 describe("Device.announcements", () => {
+  it("announces zero and unknown signal values through the same narrowing as the getter", () => {
+    const dev = Device.fromRecord("T8114P0000000000", { ...camera, params: { ...camera.params, 1142: "-71" } });
+    expect(announce(dev, { 1142: "0" })).toEqual([{ property: "wifiRssi", value: 0 }]);
+    expect(announce(dev, { 1142: "0" })).toEqual([]);
+    expect(announce(dev, { 1142: "false" })).toEqual([{ property: "wifiRssi" }]);
+    expect(announce(dev, { 1142: "-64" })).toEqual([{ property: "wifiRssi", value: -64 }]);
+  });
+
   it("names a changed schema property and the value its getter now answers", () => {
     const dev = Device.fromRecord("sn", camera);
 

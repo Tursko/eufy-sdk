@@ -28,19 +28,21 @@ import type {
 import type { CommandSink, MediaProvider, Ff09SettingsReader, RawDpCodec } from "../core/contracts.js";
 import { noopLogger, type Logger } from "../core/logger.js";
 import { structuralEqual } from "../core/util.js";
-import { resolveDevice, resolveProperties } from "./registry.js";
+import { resolveDevice } from "./registry.js";
 import {
   buildActions,
   accessorNamesFor,
   describeCapabilities,
   claimedParams,
+  mergeProperties,
+  STATION_OWNED_CAPABILITIES,
   type DeviceActionMap,
   type CapabilityAccessors,
   type DeviceManifest,
 } from "./capabilities/index.js";
 // By direct path, not the barrel: `narrow` is internal to `capabilities/` and must not join the
 // barrel's published surface. Its own JSDoc states why it is shared.
-import { narrow } from "./capabilities/members.js";
+import { narrow, type MemberDeps } from "./capabilities/members.js";
 import { paramDef, namespaceForCodec, type ParamNamespace } from "./param-namespace.js";
 
 /**
@@ -116,15 +118,12 @@ function coerce(
 }
 
 /**
- * Whether two property manifests are the same for adoption purposes — compared on the fields a device
- * fact can change (name, writability, and the per-model `enumValues`), not the whole spec (its `decode`
- * is a function, and paramType/kind never vary by context).
+ * Whether two property manifests have the same meaning, including contextual aliases and polarity.
  */
 function sameManifest(a: readonly PropertySpec[], b: readonly PropertySpec[]): boolean {
   if (a.length !== b.length) return false;
-  const sig = (p: PropertySpec) => JSON.stringify([p.name, p.writable, p.enumValues ?? null]);
-  const bSigs = new Set(b.map(sig));
-  return a.every((p) => bSigs.has(sig(p)));
+  const byName = new Map(b.map((p) => [p.name, p]));
+  return a.every((p) => structuralEqual(p, byName.get(p.name)));
 }
 
 /**
@@ -137,8 +136,8 @@ export class Device {
   /**
    * The station this device's traffic belongs to: its parent HomeBase, or its own {@link sn} when it has none.
    *
-   * Set from the record's `parentSn`, which is present only for a device that hangs off a base. A record that
-   * states none leaves the last known value, as every other identity field here does, so it starts at this
+   * Set from the record's `parentSn`, which is present only for a device that hangs off a base. An omitted parent
+   * leaves the last known value; an explicit empty parent makes the device standalone. It starts at this
    * device's own serial and every device therefore has a station.
    */
   stationSn: string;
@@ -177,6 +176,10 @@ export class Device {
   private withheld: ReadonlySet<number> = new Set();
   /** Which param namespace this device's ids live in (clean DPs vs security P2P). */
   private namespace!: ParamNamespace;
+  /** Actual reported IDs retained independently of values, in their own parameter namespaces. */
+  private readonly reportedIds = new Map<ParamNamespace, Set<number>>();
+  /** Last stated classification and topology facts; partial records do not erase them. */
+  private recordFacts: Omit<CloudRecord, "params" | "dpParams"> = {};
   /** The record's `device_name` as stated, before the {@link modelName} fallback is applied. */
   private deviceName?: string;
   /** Live property values, keyed by property name (or `unknown_<pt>`). */
@@ -188,6 +191,8 @@ export class Device {
    * `dev.<cap>()` accessors ({@link CapabilityAccessors}).
    */
   private actionMap: Partial<DeviceActionMap> = {};
+  /** Existing binding providers reused when record evidence changes the read surface. */
+  private binding?: MemberDeps;
   /**
    * Whether {@link bindActions} has run — published through {@link describe} because an unbound device
    * has no bound objects to enumerate, and "exposes nothing" and "not wired up yet" are different
@@ -257,26 +262,96 @@ export class Device {
    * the object's whole lifetime, even as the value itself started arriving. Re-resolving on fresh
    * evidence closes that: the accessor appears, already bound if the device is bound.
    *
-   * Only ever widens. A param the device stops reporting does not retract a capability, because the
-   * cloud record is a snapshot that can lose a field for reasons that have nothing to do with the
+   * Within a parameter namespace, only ever widens. A param the device stops reporting does not retract
+   * a capability, because the cloud record can lose a field for reasons that have nothing to do with the
    * hardware, and revoking an accessor a caller already holds is worse than keeping a quiet one.
    *
-   * Returns the capabilities gained, empty when nothing changed — so a caller can skip re-binding.
+   * A classification into another namespace adopts that namespace's capabilities and evidence instead.
+   * A bound device rebuilds its objects against the current facts without fetching another record.
+   * Returns the capabilities gained, empty when no capability was added.
    */
   reresolve(rec: CloudRecord): Capability[] {
     this.adoptIdentity(rec);
-    const next = resolveDevice(rec);
+    const current = { ...this.recordFacts, params: rec.params, dpParams: rec.dpParams };
+    const next = resolveDevice(current);
+    const namespace = namespaceForCodec(next.codec);
+    this.rememberReported(namespace, rec.params);
+    this.rememberReported(namespace, rec.dpParams);
     const gained = next.capabilities.filter((c) => !this.capSet.has(c));
-    const capabilities = [...new Set([...this.capabilities, ...next.capabilities])];
-    // Properties depend on device facts (deviceType/model/category drive `available` gates and
-    // per-model enums), so recompute for the UNION capability set and adopt when the manifest changed
-    // even without a capability gain — otherwise an enriched record (e.g. deviceType arriving on a
-    // later poll) would leave a stale manifest. Recomputing for the union also keeps a retained
-    // capability's properties from being dropped.
-    const properties = resolveProperties(rec, next.codec, capabilities);
-    if (!gained.length && sameManifest(properties, this.properties)) return [];
-    this.resolveInto({ ...next, capabilities, properties });
+    const capabilities = (
+      namespace === this.namespace ? [...new Set([...this.capabilities, ...next.capabilities])] : next.capabilities
+    ).filter(
+      (capability) => !(current.parentSn && next.codec !== "station" && STATION_OWNED_CAPABILITIES.has(capability)),
+    );
+    const properties = mergeProperties(capabilities, {
+      ...this.recordFacts,
+      codec: next.codec,
+      capabilities: new Set(capabilities),
+      paramIds: this.reportedIds.get(namespace),
+      stationSerial: this.recordFacts.parentSn,
+      homeBaseAttached: this.stationSn !== this.sn,
+    });
+    if (
+      gained.length ||
+      next.codec !== this.codec ||
+      next.name !== this.modelName ||
+      next.source !== this.source ||
+      !sameManifest(properties, this.properties)
+    )
+      this.resolveInto({ ...next, capabilities, properties });
+    if (this.binding) this.rebuildBinding();
     return gained;
+  }
+
+  /** Retain only actual supplied IDs, without manufacturing values or an observation timestamp. */
+  private rememberReported(namespace: ParamNamespace, params: RawParams | undefined): void {
+    const ids = this.reportedIds.get(namespace) ?? new Set<number>();
+    for (const key of Object.keys(params ?? {})) {
+      const id = Number(key);
+      if (Number.isFinite(id)) ids.add(id);
+    }
+    this.reportedIds.set(namespace, ids);
+  }
+
+  /** Current classification and reported-ID evidence over the supplied route context. */
+  private bindingContext(ctx: CommandContext): CommandContext {
+    const catalogContext = ctx.dpCatalog ? ctx : this.binding?.ctx;
+    return {
+      ...ctx,
+      codec: this.codec,
+      model: this.recordFacts.model,
+      deviceType: this.recordFacts.deviceType,
+      category: this.recordFacts.category,
+      name: this.deviceName ?? ctx.name,
+      stationSerial: this.recordFacts.parentSn ?? ctx.stationSerial,
+      homeBaseAttached: this.recordFacts.parentSn !== undefined ? this.stationSn !== this.sn : ctx.homeBaseAttached,
+      dpCatalog:
+        catalogContext?.codec === this.codec &&
+        catalogContext.model === this.recordFacts.model &&
+        catalogContext.category === this.recordFacts.category
+          ? catalogContext.dpCatalog
+          : undefined,
+      paramIds: new Set(this.reportedIds.get(this.namespace)),
+      capabilities: new Set(this.capabilities),
+    };
+  }
+
+  /** Rebuild with the current record facts and existing providers, leaving every stored value untouched. */
+  private rebuildBinding(): void {
+    if (!this.binding) return;
+    const previous = this.binding.ctx;
+    const ctx = this.bindingContext(previous);
+    const comparable = (value: CommandContext) =>
+      Object.fromEntries(
+        Object.entries({
+          ...value,
+          paramIds: [...value.paramIds].sort((a, b) => a - b),
+          capabilities: value.capabilities ? [...value.capabilities].sort() : undefined,
+        }).filter(([, fact]) => fact !== undefined),
+      );
+    if (structuralEqual(comparable(previous), comparable(ctx))) return;
+    this.binding = { ...this.binding, ctx };
+    this.actionMap = buildActions(this.capabilities, this.binding);
   }
 
   /**
@@ -298,14 +373,25 @@ export class Device {
     ff09Settings?: Ff09SettingsReader,
     rawDp?: RawDpCodec,
   ): void {
-    this.actionMap = buildActions(this.capabilities, {
-      ctx,
+    this.adoptIdentity({
+      deviceType: ctx.deviceType,
+      model: ctx.model,
+      category: ctx.category,
+      name: ctx.name,
+      parentSn: ctx.stationSerial,
+    });
+    const ids = this.reportedIds.get(this.namespace) ?? new Set<number>();
+    for (const id of ctx.paramIds) if (Number.isFinite(id)) ids.add(id);
+    this.reportedIds.set(this.namespace, ids);
+    this.binding = {
+      ctx: this.bindingContext(ctx),
       sink,
       read: (name) => this.getProperty(name),
       media,
       ff09Settings,
       rawDp,
-    });
+    };
+    this.actionMap = buildActions(this.capabilities, this.binding);
     this.bound = true;
   }
 
@@ -327,6 +413,7 @@ export class Device {
   static fromRecord(sn: string, rec: CloudRecord, logger: Logger = noopLogger): Device {
     const dev = new Device(sn, resolveDevice(rec), logger);
     dev.adoptIdentity(rec);
+    dev.rememberReported(dev.namespace, rec.dpParams);
     if (rec.params) dev.applyParams(rec.params);
     return dev;
   }
@@ -343,10 +430,20 @@ export class Device {
    * known value and only a stated one replaces it.
    */
   private adoptIdentity(rec: CloudRecord): void {
+    const classificationChanged =
+      (rec.model !== undefined && rec.model !== this.recordFacts.model) ||
+      (rec.category !== undefined && rec.category !== this.recordFacts.category);
+    this.recordFacts = {
+      deviceType: rec.deviceType ?? (classificationChanged ? undefined : this.recordFacts.deviceType),
+      model: rec.model ?? this.recordFacts.model,
+      category: rec.category ?? this.recordFacts.category,
+      name: rec.name ?? this.recordFacts.name,
+      parentSn: rec.parentSn ?? this.recordFacts.parentSn,
+    };
     this.model = rec.model ?? this.model;
     this.deviceName = rec.name ?? this.deviceName;
     this.name = this.deviceName ?? this.modelName;
-    this.stationSn = rec.parentSn ?? this.stationSn;
+    this.stationSn = rec.parentSn !== undefined ? rec.parentSn || this.sn : this.stationSn;
   }
 
   /** Does this device have the given capability? */
@@ -442,6 +539,7 @@ export class Device {
    * @returns the list of property names whose value changed.
    */
   applyParams(params: RawParams, ts: number = Date.now()): string[] {
+    this.rememberReported(this.namespace, params);
     const changed: string[] = [];
     for (const [rawKey, rawVal] of Object.entries(params)) {
       const pt = Number(rawKey);

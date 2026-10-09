@@ -1,6 +1,6 @@
 import { buildActions, CAPABILITY_MODULES, describeCapabilities } from "../index.js";
 import { Device } from "../../device.js";
-import type { Capability } from "../../types.js";
+import type { Capability, CloudRecord } from "../../types.js";
 import type { CapabilityModule, CommandContext } from "../types.js";
 import { borrowedBy } from "../members.js";
 import type { ValueMember } from "../members.js";
@@ -79,6 +79,44 @@ const tableReads = (m: CapabilityModule, paramIds: Set<number>): string[] =>
     .map(([name]) => name);
 
 describe("describeCapabilities — enumeration of the live bound objects", () => {
+  it.each([
+    { family: "S1-attached", model: "T8114", deviceType: 9, parentSn: "T9000P0000000000" },
+    { family: "HB2-attached", model: "T8114", deviceType: 9, parentSn: "T8010P0000000000" },
+    { family: "HB3-attached", model: "T8114", deviceType: 9, parentSn: "T8030P0000000000" },
+    { family: "standalone", model: "T8410", deviceType: 31 },
+    { family: "doorbell", model: "T8214", deviceType: 93, parentSn: "T9000P0000000000" },
+    { family: "wired camera", model: "T8425", deviceType: 9 },
+  ])("describes the reported read on the $family fixture", (record) => {
+    const dev = Device.fromRecord("T8114P0000000000", { ...record, params: { 1142: "-71" } });
+    dev.bindActions({ ...ctxWith(new Set([1142]), record.model), deviceType: record.deviceType }, sink);
+    const entry = dev.describe().details.find((c) => c.capability === "camera");
+    const read = entry?.reads.find((r) => r.accessor === "wifiRssi");
+    expect(read).toMatchObject({ property: "wifiRssi", type: "number", kind: "scalar" });
+    expect(read?.unit).toBeUndefined();
+    expect(entry?.actions.some((a) => a.name === "setWifiRssi")).toBe(false);
+    expect(dev.camera?.()?.wifiRssi).toBe(-71);
+  });
+
+  it("keeps a mixed roster's missing and non-camera reads absent", () => {
+    const records: CloudRecord[] = [
+      { model: "T8114", deviceType: 9, params: { 1142: "-71" } },
+      { model: "T8425", deviceType: 9, params: { 1035: "0" } },
+      { model: "T8114", deviceType: 9, params: {} },
+      { model: "RoboVac", category: "eufy_clean", params: { 1142: "-71" } },
+      { model: "T8L0", category: "eufy_life", params: { 1142: "-71" } },
+      { model: "M5", category: "ankermake", params: { 1142: "-71" } },
+    ];
+    const reads = records.map((record, i) => {
+      const dev = Device.fromRecord(`synthetic-${i}`, record);
+      dev.bindActions(
+        { ...ctxWith(new Set(Object.keys(record.params ?? {}).map(Number)), record.model), codec: dev.codec },
+        sink,
+      );
+      return dev.describe().details.some((c) => c.reads.some((r) => r.accessor === "wifiRssi"));
+    });
+    expect(reads).toEqual([true, false, false, false, false, false]);
+  });
+
   it("describes only the alarm-output members installed for each verified siren family", () => {
     const describeSiren = (ctx: CommandContext) =>
       describeCapabilities(buildActions(["siren"], { ctx, sink, read: () => undefined })).find(

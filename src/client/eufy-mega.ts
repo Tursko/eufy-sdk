@@ -26,6 +26,7 @@ import { decodeMapFrame } from "./map-channels.js";
 import { VacuumMapStore } from "../model/index.js";
 import { type P2PSession, type P2PFrame } from "../transport/p2p/p2p-session.js";
 import { P2PCommandRouter } from "../transport/p2p/command-router.js";
+import { stationOf } from "../transport/p2p/station-channels.js";
 import { RtcCommandRouter } from "../transport/rtc/command-router.js";
 import { jpegGeometry } from "../transport/p2p/media.js";
 import type { PowerTier } from "../transport/p2p/session-manager.js";
@@ -67,7 +68,7 @@ import { MemoryFcmStore } from "../transport/push/store.js";
 import { StoredImageCache } from "../transport/stored-image-cache.js";
 import type { PushEvent, RawPushMessage } from "../transport/push/types.js";
 import { type AvailabilityObservation, type EufyDevice, type RealtimeTransport } from "../core/types.js";
-import { Timer } from "../core/util.js";
+import { Timer, structuralEqual } from "../core/util.js";
 import {
   Device,
   resolveDevice,
@@ -78,6 +79,7 @@ import {
 } from "../model/index.js";
 import { isHomeBase, isStation9000 } from "../model/device-family.js";
 import { cameraPowerTier } from "../model/capabilities/battery.js";
+import { namespaceForCodec } from "../model/param-namespace.js";
 import { DeviceRegistry, type DeviceRecord, type ParamChange } from "./device-registry.js";
 import type {
   EufyMegaOptions,
@@ -289,6 +291,13 @@ export class EufyMega extends EventEmitter {
    * yet, which is the signal to rebuild them (see {@link rebindReads}).
    */
   private readonly boundParamIds = new Map<string, ReadonlySet<number>>();
+  /** Cloud presence and realtime precedence are evidence IDs, never retained raw report values. */
+  private readonly cloudParamIds = new WeakMap<Device, ReadonlySet<number>>();
+  private readonly realtimeParamIds = new WeakMap<Device, Map<number, number>>();
+  private realtimeReportRevision = 0;
+  /** A cached reconciliation supersedes the context of an older asynchronous read adoption. */
+  private readonly polledReads = new WeakMap<Device, symbol>();
+  private readonly readContexts = new WeakMap<Device, CommandContext>();
   /** Per-SKU DP catalog cache — keyed on model/T-code, fetched lazily via `get_product_data_point`. */
   private readonly dpCatalogCache = new Map<string, DpCatalog>();
   /** Semantic event names that speculatively pre-warm P2P (resolved once from the options; empty = off). */
@@ -602,7 +611,13 @@ export class EufyMega extends EventEmitter {
     if (widens && known) this.boundParamIds.set(sn, new Set([...known, ...reported]));
     this.registry.applyRealtimeParams(sn, params);
     const device = this.liveDeviceToAnnounce(sn);
-    if (device) this.applyAndAnnounce(device, params);
+    if (device) {
+      const realtime = this.realtimeParamIds.get(device) ?? new Map<number, number>();
+      const revision = ++this.realtimeReportRevision;
+      for (const id of reported) realtime.set(id, revision);
+      this.realtimeParamIds.set(device, realtime);
+      this.applyAndAnnounce(device, params);
+    }
     this.emit("deviceState", this.deviceState(sn));
     if (widens) void this.rebindReads(sn);
   }
@@ -637,11 +652,38 @@ export class EufyMega extends EventEmitter {
   private async rebindReads(sn: string): Promise<void> {
     const dev = this.liveDevices.get(sn)?.deref();
     if (!dev) return;
+    const polled = this.polledReads.get(dev);
+    const namespace = namespaceForCodec(dev.codec);
+    const revisions = new Map(this.realtimeParamIds.get(dev));
     try {
       const rec = await this.registry.record(sn);
-      dev.reresolve(rec);
-      if (rec.dpParams) this.applyAndAnnounce(dev, rec.dpParams);
       const ctx = await this.commandContext(sn, rec);
+      const superseded = this.polledReads.get(dev) !== polled;
+      if (!superseded) dev.reresolve(rec);
+      const latest = this.readContexts.get(dev);
+      const compatible =
+        namespace === namespaceForCodec(dev.codec) &&
+        latest?.model === rec.model &&
+        latest?.category === rec.category &&
+        latest?.deviceType === rec.deviceType &&
+        (latest?.stationSerial || sn) === (rec.parentSn || sn);
+      if (superseded && latest && compatible) {
+        dev.reresolve({ ...rec, name: latest.name, parentSn: latest.stationSerial ?? "" });
+        this.boundParamIds.set(sn, new Set([...(this.boundParamIds.get(sn) ?? []), ...ctx.paramIds]));
+      }
+      if (rec.dpParams && (!superseded || compatible)) {
+        const params: RawParams = {};
+        for (const [key, value] of Object.entries(rec.dpParams)) {
+          const id = Number(key);
+          if ((!superseded || revisions.has(id)) && revisions.get(id) === this.realtimeParamIds.get(dev)?.get(id))
+            params[id] = value;
+        }
+        if (Object.keys(params).length) this.applyAndAnnounce(dev, params);
+      }
+      if (superseded) {
+        this.emit("deviceState", this.deviceState(sn));
+        return;
+      }
       dev.bindActions(
         ctx,
         this.commandSinkFor(sn),
@@ -649,6 +691,7 @@ export class EufyMega extends EventEmitter {
         this.ff09SettingsReaderFor(sn, ctx),
         rawDpCodec,
       );
+      this.readContexts.set(dev, ctx);
       this.boundParamIds.set(sn, new Set([...(this.boundParamIds.get(sn) ?? []), ...ctx.paramIds]));
       this.emit("deviceState", this.deviceState(sn));
     } catch (e) {
@@ -1285,6 +1328,9 @@ export class EufyMega extends EventEmitter {
     const dev = Device.fromRecord(sn, rec, this.opts.logger);
     if (rec.dpParams) dev.applyParams(rec.dpParams);
     this.liveDevices.set(sn, new WeakRef(dev));
+    const cloudParams = this.registry.list().find((record) => record.sn === sn)?.params ?? rec.params;
+    this.cloudParamIds.set(dev, new Set(Object.keys(cloudParams ?? {}).map(Number)));
+    this.realtimeParamIds.set(dev, new Map(Object.keys(rec.dpParams ?? {}).map((id) => [Number(id), 0])));
     const ctx = await this.commandContext(sn);
     dev.bindActions(
       ctx,
@@ -1293,6 +1339,7 @@ export class EufyMega extends EventEmitter {
       this.ff09SettingsReaderFor(sn, ctx),
       rawDpCodec,
     );
+    this.readContexts.set(dev, ctx);
     this.boundParamIds.set(sn, ctx.paramIds);
     if (this.opts.autoRealtime !== false) {
       dev.setFreshnessPolicy({
@@ -1495,8 +1542,11 @@ export class EufyMega extends EventEmitter {
    * {@link deviceState} answers an initial reading.
    */
   private async pollOnce(): Promise<void> {
+    const epoch = this.realtimeEpoch;
     try {
       const diff = await this.registry.pollChanges();
+      if (epoch !== this.realtimeEpoch) return;
+      const reconciled = this.reconcilePolledReads(diff.params);
       for (const dev of diff.added) this.emit("deviceAdded", dev);
       for (const dev of diff.removed) this.emit("deviceRemoved", dev);
       this.applyPolledParams(diff.params);
@@ -1504,10 +1554,95 @@ export class EufyMega extends EventEmitter {
         for (const out of decodeCapabilityEvent({ source: "poll", ...change }, this.capsForEvent(change.deviceSn)))
           this.emitSemantic(out.event, out.payload, { refresh: out.refresh });
       for (const dev of diff.reported) this.emit("deviceState", this.stateOf(dev));
-      for (const change of diff.params) await this.widenCapabilities(change.deviceSn);
+      for (const sn of new Set(diff.params.map((change) => change.deviceSn)))
+        if (!reconciled.has(sn)) await this.widenCapabilities(sn);
     } catch (e) {
       this.reportError(e);
     }
+  }
+
+  /**
+   * Discover first cloud fields from the already refreshed roster, even when the registry correctly
+   * reports no value transition. Re-resolve before landing changed values, so their named reads agree.
+   * Only newly present cloud IDs are initialized here; realtime reports still outrank stale siblings.
+   */
+  private reconcilePolledReads(changes: readonly ParamChange[]): Set<string> {
+    const reconciled = new Set<string>();
+    for (const cached of this.registry.list()) {
+      const dev = this.liveDevices.get(cached.sn)?.deref();
+      if (!dev) continue;
+      this.polledReads.set(dev, Symbol());
+      const oldContext = this.readContexts.get(dev);
+      const raw = (cached.raw ?? {}) as Record<string, unknown>;
+      const station = stationOf(cached);
+      const category = typeof raw.category === "string" ? cached.category : (oldContext?.category ?? cached.category);
+      const reclassified =
+        (cached.model !== undefined && cached.model !== oldContext?.model) ||
+        (category !== undefined && category !== oldContext?.category);
+      const rec: DeviceRecord = {
+        deviceType:
+          typeof raw.device_type === "number" ? raw.device_type : reclassified ? undefined : oldContext?.deviceType,
+        model: cached.model ?? oldContext?.model,
+        category,
+        name: cached.name ?? oldContext?.name,
+        parentSn:
+          station !== cached.sn
+            ? station
+            : Object.hasOwn(raw, "parent_sn") || Object.hasOwn(raw, "station_sn")
+              ? ""
+              : oldContext?.stationSerial,
+        params: cached.params ?? {},
+        paramUpdatedAt: cached.paramUpdatedAt ?? {},
+      };
+      const previousNamespace = namespaceForCodec(dev.codec);
+      const gained = dev.reresolve(rec);
+      const switched = previousNamespace !== namespaceForCodec(dev.codec);
+      if (switched) this.realtimeParamIds.delete(dev);
+      const present = new Set(Object.keys(rec.params).map(Number));
+      const ids = new Set([...(switched ? [] : (this.boundParamIds.get(cached.sn) ?? [])), ...present]);
+      if (oldContext) {
+        const ctx = this.contextForRecord(cached.sn, rec, rec.model ? this.dpCatalogCache.get(rec.model) : undefined);
+        if (typeof raw.device_channel !== "number") ctx.channel = oldContext.channel;
+        ctx.paramIds = ids;
+        ctx.capabilities = new Set(dev.capabilities);
+        const comparable = (value: CommandContext) => ({
+          ...value,
+          paramIds: [...value.paramIds].sort((a, b) => a - b),
+          capabilities: value.capabilities ? [...value.capabilities].sort() : undefined,
+        });
+        if (!structuralEqual(comparable(oldContext), comparable(ctx))) {
+          dev.bindActions(
+            ctx,
+            this.commandSinkFor(cached.sn),
+            this.mediaProviderFor(cached.sn),
+            this.ff09SettingsReaderFor(cached.sn, ctx),
+            rawDpCodec,
+          );
+          this.readContexts.set(dev, ctx);
+        }
+      }
+      const previous = switched ? new Set<number>() : (this.cloudParamIds.get(dev) ?? present);
+      const realtime = this.realtimeParamIds.get(dev);
+      const moved = new Set(
+        changes.filter((change) => change.deviceSn === cached.sn).map((change) => change.paramType),
+      );
+      const initial: RawParams = {};
+      const returning: RawParams = {};
+      const known = switched ? undefined : this.boundParamIds.get(cached.sn);
+      for (const id of present)
+        if (!previous.has(id) && !realtime?.has(id) && !moved.has(id)) {
+          const params = known?.has(id) ? returning : initial;
+          params[id] = rec.params[id]!;
+        }
+      if (Object.keys(initial).length) dev.applyParams(initial);
+      if (Object.keys(returning).length) this.applyAndAnnounce(dev, returning);
+      this.cloudParamIds.set(dev, present);
+      this.boundParamIds.set(cached.sn, ids);
+      if (gained.length)
+        this.emit("deviceCapabilities", { deviceSn: cached.sn, gained, capabilities: [...dev.capabilities] });
+      reconciled.add(cached.sn);
+    }
+    return reconciled;
   }
 
   /**
@@ -1542,7 +1677,10 @@ export class EufyMega extends EventEmitter {
     for (const [sn, params] of byDevice) {
       this.registry.retireRealtimeParams(sn, Object.keys(params).map(Number));
       const device = this.liveDeviceToAnnounce(sn);
-      if (device) this.applyAndAnnounce(device, params);
+      if (device) {
+        for (const id of Object.keys(params).map(Number)) this.realtimeParamIds.get(device)?.delete(id);
+        this.applyAndAnnounce(device, params);
+      }
     }
   }
 
@@ -2123,6 +2261,16 @@ export class EufyMega extends EventEmitter {
   /** The {@link CommandContext} for a device, built from `known` when that record is already in hand. */
   private async commandContext(sn: string, known?: DeviceRecord): Promise<CommandContext> {
     const rec = known ?? (await this.registry.record(sn));
+    const resolved = resolveDevice(rec);
+    const dpCatalog =
+      (resolved.codec === "vacuum" || resolved.codec === "mower") && rec.model
+        ? await this.fetchDpCatalog(rec.model)
+        : undefined;
+    return this.contextForRecord(sn, rec, dpCatalog);
+  }
+
+  /** The same context derivation for fetched records and cached polls; this half performs no I/O. */
+  private contextForRecord(sn: string, rec: DeviceRecord, dpCatalog?: DpCatalog): CommandContext {
     // Resolve the record synchronously from the registry (already loaded by `record()`) — the same
     // single lookup the command sink uses, and it never opens a transport just to read a record.
     const dev = this.registry.require(sn);
@@ -2131,16 +2279,12 @@ export class EufyMega extends EventEmitter {
     const channel = typeof rawChannel === "number" ? rawChannel : 0;
     const member = (raw.member ?? {}) as Record<string, any>;
     const resolved = resolveDevice(rec);
-    const dpCatalog =
-      (resolved.codec === "vacuum" || resolved.codec === "mower") && rec.model
-        ? await this.fetchDpCatalog(rec.model)
-        : undefined;
     return {
       channel,
       codec: resolved.codec,
       deviceType: rec.deviceType,
       model: rec.model,
-      category: dev.category,
+      category: rec.category,
       serial: sn,
       stationSerial: rec.parentSn,
       // Identity metadata for `info`, for a host's device-registry surface. `name` = the app-shown
@@ -2163,8 +2307,8 @@ export class EufyMega extends EventEmitter {
       // setRainMode) on this. Keyed on the P2P stack's own predicate (a usable `p2p_did` endpoint).
       hasP2p: P2PCommandRouter.claimsDevice(dev),
       // Topology as the record states it: a parent that isn't the device itself means HomeBase-attached.
-      homeBaseAttached: !!raw.parent_sn && raw.parent_sn !== dev.sn,
-      dpCatalog,
+      homeBaseAttached: !!rec.parentSn && rec.parentSn !== sn,
+      dpCatalog: resolved.codec === "vacuum" || resolved.codec === "mower" ? dpCatalog : undefined,
     };
   }
 
