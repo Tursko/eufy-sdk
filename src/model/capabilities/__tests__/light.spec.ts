@@ -93,13 +93,13 @@ describe("light capability module", () => {
       });
     });
 
-    it("spotlightEnabled on a T8423 (deviceType 38) → int-string 1403; brightness stays direct-binary", () => {
+    it("spotlightEnabled on a T8423 (deviceType 38) → session-chosen level for 1403; brightness stays direct-binary", () => {
       const t8423 = { ...ctx(), deviceType: 38 };
       expect(intent("spotlightEnabled", false, t8423)).toEqual({
         kind: "set-param",
         param: LIGHT_CMD.SPOTLIGHT_ENABLE,
         value: 0,
-        form: "int-string",
+        form: "auto",
         channel: 0,
       });
       expect(intent("brightness", 50, t8423)).toMatchObject({ form: "direct-binary" });

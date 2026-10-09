@@ -206,18 +206,6 @@ function directBinary(param: number, value: number, ctx: CommandContext): Comman
   return setScalar(param, value, ctx, "direct-binary");
 }
 
-/** DeviceTypes whose spotlight master enable (1403) takes the level-1 int+string frame instead. */
-const SPOTLIGHT_ENABLE_INT_STRING_TYPES: ReadonlySet<number> = new Set<number>([DeviceType.FLOODLIGHT_CAMERA_8423]);
-
-/** The master-enable write in the frame this device takes: int+string where listed, else direct-binary. */
-function spotlightEnableCommand(on: boolean, ctx: CommandContext): Command {
-  const value = on ? 1 : 0;
-  if (ctx.deviceType !== undefined && SPOTLIGHT_ENABLE_INT_STRING_TYPES.has(ctx.deviceType)) {
-    return setScalar(LIGHT_CMD.SPOTLIGHT_ENABLE, value, ctx, "int-string");
-  }
-  return directBinary(LIGHT_CMD.SPOTLIGHT_ENABLE, value, ctx);
-}
-
 /**
  * The switch frame, or a throw naming the device whose frame shape is unconfirmed.
  *
@@ -320,6 +308,9 @@ export const LIGHT_MEMBERS = {
    * This is the switch a user changes and expects to STAY changed. {@link isOn} is a different fact:
    * the lamp being lit right now, driven by whichever
    * client is streaming — the vendor app lights it for a live view and drops it on quitting.
+   *
+   * The T8423 write takes the session-chosen level; level-1 int+string was verified live on a standalone
+   * unit.
    */
   spotlightEnabled: {
     param: LIGHT_CMD.SPOTLIGHT_ENABLE,
@@ -329,7 +320,13 @@ export const LIGHT_MEMBERS = {
     description:
       "The spotlight master switch, distinct from the on/off above — whether the spotlight may light at " +
       "all. Read verified live on a T8170 (param 1403, direct polarity: 1 = enabled).",
-    write: (v, ctx) => spotlightEnableCommand(asBool(v), ctx),
+    write: (v, ctx) =>
+      setScalar(
+        LIGHT_CMD.SPOTLIGHT_ENABLE,
+        asBool(v) ? 1 : 0,
+        ctx,
+        ctx.deviceType === DeviceType.FLOODLIGHT_CAMERA_8423 ? "auto" : "direct-binary",
+      ),
     writeAs: "setEnabled",
   },
 } as const satisfies Members;
