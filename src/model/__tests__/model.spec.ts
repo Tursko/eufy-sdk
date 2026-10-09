@@ -268,6 +268,15 @@ describe("doorbell — confirmed against real T8214", () => {
     expect(r.name).toBe("Wired Doorbell 2K");
   });
 
+  it("types the battery T8213 as a doorbell", () => {
+    // Without its registry row the raw T-code missed the doorbell model hint, so a T8213's presses
+    // arrived but the host built no doorbell event or ring trigger (ha-eufy-sdk#38).
+    const r = resolveDevice({ model: "T8213", deviceType: 91 });
+    expect(r.capabilities).toContain("doorbell");
+    expect(r.capabilities).toContain("battery");
+    expect(r.name).toBe("Video Doorbell Dual");
+  });
+
   it("decodes real doorbell param values (chime on, ringtone vol 80, notification JSON)", () => {
     const dev = Device.fromRecord("T8214DB", {
       model: "T8214",
