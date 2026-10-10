@@ -21,6 +21,8 @@ import type {
   AacEncoder,
   SharedSourceHints,
   AbortableCall,
+  LiveAudioFrame,
+  TalkbackCodec,
   TalkbackHandle,
 } from "../../core/contracts.js";
 import {
@@ -139,6 +141,45 @@ export const P2P_STATION_WAITS = {
 
 /** How long a station's live RTSP URL push is awaited — the connect wait and the URL wait together. */
 const RTSP_URL_READ_TIMEOUT_MS = 12_000;
+
+/**
+ * How long a talkback waits for an audio frame, counted from the first frame of either kind its media session
+ * delivers, to learn which codec the speaker plays. A live session delivers audio every 30–64 ms, so a running stream
+ * answers at once. A stream that delivers video and no audio opens as `aac-lc` once this elapses; one that delivers
+ * nothing ends with its source's warm-up deadline.
+ */
+const TALKBACK_CODEC_WAIT_MS = 3000;
+
+/** Models whose speaker plays `aac-eld` talkback; every other model talks `aac-lc`. */
+const ELD_TALKBACK_MODELS: ReadonlySet<string> = new Set(["T8410C"]);
+
+/**
+ * The codec a camera's speaker plays: `aac-eld` when the first audio frame `consumer` delivers is `aac-eld`, otherwise
+ * `aac-lc`. The `timeoutMs` wait starts at the consumer's first frame of either kind, so a cold source's warm-up is not
+ * counted. Resolves `aac-lc` when that wait elapses with no audio, or when the consumer or `talk` stops first.
+ */
+function speakerCodec(consumer: Consumer, talk: Talkback, timeoutMs: number): Promise<TalkbackCodec> {
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const settle = (codec: TalkbackCodec): void => {
+      clearTimeout(timer);
+      consumer.off("video", onVideo);
+      consumer.off("audio", onAudio);
+      consumer.off("stop", onStop);
+      talk.off("stop", onStop);
+      resolve(codec);
+    };
+    const onVideo = (): void => {
+      timer ??= setTimeout(() => settle("aac-lc"), timeoutMs);
+    };
+    const onAudio = (frame: LiveAudioFrame): void => settle(frame.codec === "aac-eld" ? "aac-eld" : "aac-lc");
+    const onStop = (): void => settle("aac-lc");
+    consumer.on("video", onVideo);
+    consumer.on("audio", onAudio);
+    consumer.on("stop", onStop);
+    talk.once("stop", onStop);
+  });
+}
 
 /**
  * Options accepted when warming a {@link SharedLiveSource} for a device (all optional).
@@ -832,6 +873,11 @@ export class P2PCommandRouter {
    * stream costs nothing extra and a talkback on an otherwise idle camera opens the session it needs
    * instead of playing into silence.
    *
+   * **On a model in {@link ELD_TALKBACK_MODELS}, the speaker plays the codec the camera sends.** So the first
+   * audio frame of the media session this talkback holds decides its codec ({@link speakerCodec}), within
+   * {@link TALKBACK_CODEC_WAIT_MS} of the session's first frame, and the claim is re-checked after that wait as
+   * after the warm-up. Every other model opens `aac-lc` at once.
+   *
    * The level-2 key is waited for softly: only the HomeBase-attached path requires it, and
    * {@link Talkback.start} reports that failure precisely, so a hard wait here would reject an
    * own-session camera that legitimately never negotiates one.
@@ -904,7 +950,13 @@ export class P2PCommandRouter {
       consumer.on("stop", () => {
         void talk.stop().catch((e: unknown) => logger.warn?.(`talkback: stop for ${sn} failed: ${String(e)}`));
       });
-      return talk.start();
+      const codec = ELD_TALKBACK_MODELS.has(this.recordFor(sn)?.model ?? "")
+        ? await speakerCodec(consumer, talk, TALKBACK_CODEC_WAIT_MS)
+        : "aac-lc";
+      if (this.talkbacks.get(key) !== talk) {
+        throw new Error(`talkback: ${sn} was closed while its speaker codec was being read`);
+      }
+      return talk.start(codec);
     } catch (e) {
       if (this.talkbacks.get(key) === talk) this.talkbacks.delete(key);
       consumer?.stop();
