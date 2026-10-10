@@ -22,9 +22,9 @@ export const CAMERA_CMD = {
   /** Wrapped T8410 power switch on HomeBase 3. */
   PRIVACY_MODE: 6250,
   /**
-   * Privacy mode (app `CMD_INDOOR_ENABLE_PRIVACY_MODE_S350`): the S350 family's camera on/off. Rides the
-   * `1350` SET_PAYLOAD envelope (`{account_id,cmd:6250,mChannel,mValue3:0,payload:{switch}}`), switch
-   * 0 = privacy off (camera ON), 1 = privacy on (camera OFF). See {@link ridesPrivacyEnvelope}.
+   * Privacy mode (app `CMD_INDOOR_ENABLE_PRIVACY_MODE_S350`): the S350 family's reported camera on/off,
+   * written by the privacy burst. Switch 0 = privacy off (camera ON), 1 = privacy on (camera OFF). See
+   * {@link ridesPrivacyEnvelope}.
    */
   PRIVACY_ENABLE: 6250,
   /**
@@ -459,17 +459,16 @@ function hasUnreflectedHomeBasePower(ctx: CommandContext): boolean {
  * [account_id]`, the channel selecting an attached camera — sealed at level-2 or level-1 exactly as the
  * session's key allowed. The capture contains no `6250` frame at all.
  *
- * Two exceptions, both a single `1350` SET_PAYLOAD frame on the camera channel carrying 6250 with `mValue3` 0
- * (the transport injects the account identity). Neither is the multi-frame privacy burst.
- * - The S350 family ({@link ridesPrivacyEnvelope}): its power is the privacy switch, sent `"auto"`, so a
- *   keyless session gets the level-1 string-payload form of the same object.
- * - T8410 on HomeBase 3 when its firmware selects that route ({@link usesHomeBasePowerPayload}): the wrapped
- *   disable-bit switch.
+ * Two exceptions, both carrying 6250:
+ * - The S350 family ({@link ridesPrivacyEnvelope}): its power IS privacy mode, so it is written through
+ *   {@link privacyCommand} — the app-captured multi-frame burst `privacy` sends, one wire for one state.
+ *   The burst is level-2 only, so a keyless session cannot power this family.
+ * - T8410 on HomeBase 3 when its firmware selects that route ({@link usesHomeBasePowerPayload}): a single
+ *   `1350` SET_PAYLOAD frame on the camera channel with `mValue3` 0, the wrapped disable-bit switch (the
+ *   transport injects the account identity).
  */
 function powerCommand(on: boolean, ctx: CommandContext): Command {
-  if (ridesPrivacyEnvelope(ctx)) {
-    return setPayload(CAMERA_CMD.PRIVACY_ENABLE, { switch: privacySwitchValue(on) }, ctx, 0, undefined, "auto");
-  }
+  if (ridesPrivacyEnvelope(ctx)) return privacyCommand(!on, ctx.channel);
   if (usesHomeBasePowerPayload(ctx)) return setPayload(CAMERA_CMD.PRIVACY_MODE, { switch: on ? 0 : 1 }, ctx, 0);
   return setScalar(CAMERA_CMD.CAMERA_ENABLE, powerValue(on, ctx), ctx, "auto");
 }

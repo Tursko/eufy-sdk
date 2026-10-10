@@ -464,26 +464,18 @@ describe("camera capability module", () => {
 
     /**
      * Live: on an S350 (T8416), app privacy mode is a state 1035 never touches — a 1035 "on" left the camera
-     * in privacy, recording nothing. Its power is the 6250 privacy switch, as in bropat/eufy-security-client.
+     * in privacy, recording nothing. Its power is privacy mode, so it rides the same wire `privacy` does.
      */
-    it("S350 family writes the 6250 privacy switch: ON ⇒ switch 0, OFF ⇒ switch 1, one auto frame", () => {
+    it("S350 family powers through the privacy burst: ON ⇒ privacy off, OFF ⇒ privacy on", () => {
       for (const deviceType of [
         DeviceType.INDOOR_PT_CAMERA_S350,
         DeviceType.INDOOR_PT_CAMERA_E30,
         DeviceType.INDOOR_PT_CAMERA_C220,
       ]) {
-        expect(buildCommand("on", true, ctx(5, { deviceType }))).toEqual({
-          kind: "set-payload",
-          cmd: CAMERA_CMD.PRIVACY_ENABLE,
-          payload: { switch: 0 },
-          channel: 5,
-          mValue3: 0,
-          form: "auto",
-        });
-        expect(buildCommand("off", false, ctx(5, { deviceType }))).toMatchObject({
-          cmd: CAMERA_CMD.PRIVACY_ENABLE,
-          payload: { switch: 1 },
-        });
+        const c = ctx(5, { deviceType });
+        expect(buildCommand("on", true, c)).toEqual({ kind: "p2p-privacy-burst", enabled: false, channel: 5 });
+        expect(buildCommand("off", false, c)).toEqual({ kind: "p2p-privacy-burst", enabled: true, channel: 5 });
+        expect(buildCommand("off", false, c)).toEqual(buildCommand("privacy", true, c));
       }
     });
   });
