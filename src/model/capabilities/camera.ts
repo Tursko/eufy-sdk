@@ -15,6 +15,8 @@ import { CameraDisabledError, type Command, type MediaProvider } from "../../cor
  * `transport/p2p/commands.ts`). Each entry notes its app `CommandType` name.
  */
 export const CAMERA_CMD = {
+  /** Camera-reported Wi-Fi signal (app `CMD_GET_WIFI_RSSI`). */
+  WIFI_RSSI: 1142,
   /** Camera on/off. Read and write polarity depend on the family and topology. */
   CAMERA_ENABLE: 1035,
   /** Wrapped T8410 power switch on HomeBase 3. */
@@ -519,6 +521,14 @@ function refuseWhenDisabled(ctx: CommandContext, read: (name: string) => { value
  * @internal
  */
 export const CAMERA_MEMBERS = {
+  /** Reads the latest cached report and exposes no setter. */
+  wifiRssi: {
+    param: CAMERA_CMD.WIFI_RSSI,
+    type: "number",
+    kind: "scalar",
+    provenance: "apk",
+    description: "Camera-reported Wi-Fi signal; physical units and a quality scale are unspecified.",
+  },
   /**
    * The default READ is the *disable*-bit convention (1035 "0" ⇒ ON, 2001 direct); the WRITE polarity is
    * family-dependent — see `powerValue` / `isEnableBitPolarity`. Battery/solo cams report the state under

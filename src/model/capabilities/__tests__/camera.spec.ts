@@ -43,6 +43,7 @@ describe("camera capability module", () => {
   it("declares the capability + schema", () => {
     expect(CAMERA.capability).toBe("camera");
     expect(CAMERA.properties.map((p) => p.name)).toEqual([
+      "wifiRssi",
       "enabled",
       "imageFlipped",
       "watermark",
@@ -56,6 +57,23 @@ describe("camera capability module", () => {
       "antiTheftDetection",
       "statusLed",
     ]);
+  });
+
+  describe("wifiRssi", () => {
+    it.each([
+      { deviceType: 47, model: "T8425", homeBaseAttached: true },
+      { deviceType: 31, model: "T8410", homeBaseAttached: false },
+    ])("reads reported signal on $model and follows cache updates", (identity) => {
+      const dev = Device.fromRecord("SN", { ...identity, params: { 1142: "-62" } });
+      dev.bindActions(ctx(0, { ...identity, paramIds: new Set([1142]) }), { dispatch: async () => undefined });
+      const acts = dev.camera!()!;
+      expect(acts.wifiRssi).toBe(-62);
+      expect("setWifiRssi" in acts).toBe(false);
+      dev.applyParams({ 1142: "0" });
+      expect(acts.wifiRssi).toBe(0);
+      dev.applyParams({ 1142: "not-a-number" });
+      expect(acts.wifiRssi).toBeUndefined();
+    });
   });
 
   // Every wire here was captured from the app on an indoor pan-tilt (standalone, mains) and read back
