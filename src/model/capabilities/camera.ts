@@ -735,6 +735,8 @@ export const CAMERA_MEMBERS = {
             { channel: 0, mode: 0, primary_view: 0, quality: q, transaction: String(Date.now()) },
             ctx,
             0,
+            undefined,
+            "auto",
           );
     },
   },

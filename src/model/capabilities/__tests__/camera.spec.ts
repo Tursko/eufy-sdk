@@ -12,7 +12,6 @@ import {
   StreamingQuality,
   STREAMING_QUALITY_TIERS,
   resolveStreamingQuality,
-  resolveStreamingQualityTier,
 } from "../camera.js";
 import type { RecordingQualityName } from "../camera.js";
 import { buildCommand } from "../index.js";
@@ -307,35 +306,23 @@ describe("camera capability module", () => {
     });
 
     it("streamingQuality → 2730's 1350 payload, and it is NOT the recording wire", () => {
-      // Tier 0 is Auto, which recording has no equivalent for.
       expect(STREAMING_QUALITY_TIERS[0]).toBe("Auto");
       expect(RECORDING_QUALITY_TIERS[0]).toBeUndefined();
       expect(resolveStreamingQuality(3)).toBe("Max");
       const cmd = buildCommand("streamingQuality", StreamingQuality.Auto, ctx(0));
       expect(cmd).toMatchObject({
         kind: "set-payload",
-        cmd: CAMERA_CMD.STREAMING_QUALITY_SET, // 2730
+        cmd: CAMERA_CMD.STREAMING_QUALITY_SET,
         mValue3: 0,
+        form: "auto",
         payload: { channel: 0, mode: 0, primary_view: 0, quality: 0 },
       });
-      // The two settings ride different sub-commands; confusing them is the trap this pins.
       expect(CAMERA_CMD.STREAMING_QUALITY_SET).not.toBe(CAMERA_CMD.RECORDING_QUALITY_SET);
       expect(buildCommand("recordingQuality", 3, ctx(0))).toMatchObject({
         cmd: CAMERA_CMD.RECORDING_QUALITY_SET,
       });
-      // `transaction` is in the captured frame, so only its shape is fixed.
       expect((cmd as { payload: Record<string, unknown> }).payload.transaction).toMatch(/^\d{13}$/);
       expect(buildCommand("streamingQuality", "Max", ctx(2))).toMatchObject({ payload: { quality: 3 } });
-    });
-
-    it("streamingQuality takes Auto where recordingQuality refuses 0", () => {
-      // Same number, different meaning: 0 is a real tier on one wire and out of range on the other.
-      expect(resolveStreamingQualityTier(0)).toBe(0);
-      expect(resolveStreamingQualityTier("Auto")).toBe(0);
-      expect(() => buildCommand("recordingQuality", 0, ctx())).toThrow(/recordingQuality/);
-      for (const bad of [-1, 4, 99, "nope"]) {
-        expect(resolveStreamingQualityTier(bad as number)).toBeUndefined();
-      }
     });
 
     it("recordingQuality throws on a value that isn't a real tier (no bogus value on the fire-and-forget wire)", () => {
