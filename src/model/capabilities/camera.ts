@@ -434,18 +434,19 @@ function hasUnreflectedHomeBasePower(ctx: CommandContext): boolean {
  * session's key allowed. The capture contains no `6250` frame at all.
  *
  * Two exceptions, both carrying 6250:
- * - The S350 family ({@link isIndoorPanTiltS350}): its power IS privacy mode, so it is written through
+ * - The S350 (`INDOOR_PT_CAMERA_S350`): its power IS privacy mode, so it is written through
  *   {@link privacyCommand} — the app-captured multi-frame burst `privacy` sends, one wire for one state.
- *   The burst is level-2 only, so a keyless session cannot power this family. ✅ Observed live on an S350
- *   (T8416, HomeBase-attached): privacy mode set in the eufy app is a state 1035 does not touch — a 1035 "on"
- *   left the camera in privacy mode, recording no events — and the cloud record carries a 1035 that never
- *   follows the app's switch. None of the six captured cameras was of this family.
+ *   The burst is level-2 only, so a keyless session cannot power it. ✅ Observed live on an S350 (T8416,
+ *   HomeBase-attached): privacy mode set in the eufy app is a state 1035 does not touch — a 1035 "on" left the
+ *   camera in privacy mode, recording no events — and the cloud record carries a 1035 that never follows the
+ *   app's switch. None of the six captured cameras was an S350. Only this type was run, so the rest of its
+ *   family (E30, C210, C220, C220 v2) stays on 1035 until a run of each says otherwise.
  * - T8410 on HomeBase 3 when its firmware selects that route ({@link usesHomeBasePowerPayload}): a single
  *   `1350` SET_PAYLOAD frame on the camera channel with `mValue3` 0, the wrapped disable-bit switch (the
  *   transport injects the account identity).
  */
 function powerCommand(on: boolean, ctx: CommandContext): Command {
-  if (isIndoorPanTiltS350(ctx)) return privacyCommand(!on, ctx.channel);
+  if (ctx.deviceType === DeviceType.INDOOR_PT_CAMERA_S350) return privacyCommand(!on, ctx.channel);
   if (usesHomeBasePowerPayload(ctx)) return setPayload(CAMERA_CMD.PRIVACY_MODE, { switch: on ? 0 : 1 }, ctx, 0);
   return setScalar(CAMERA_CMD.CAMERA_ENABLE, powerValue(on, ctx), ctx, "auto");
 }
@@ -500,8 +501,8 @@ function enablementReflection(
   ctx: CommandContext,
 ): { param: number; expected: boolean | number; observed: boolean } | undefined {
   // Written through the privacy burst, which no reported param has been seen to follow: the 1035 this
-  // family reports never moves, and no S350 record has carried 6250.
-  if (isIndoorPanTiltS350(ctx)) return undefined;
+  // S350 reports never moves, and no S350 record has carried 6250.
+  if (ctx.deviceType === DeviceType.INDOOR_PT_CAMERA_S350) return undefined;
   const alias = CAMERA_MEMBERS.enabled.readAliases[0].paramType;
   if (ctx.paramIds.has(alias)) return { param: alias, expected: on, observed: on };
   if (hasUnreflectedHomeBasePower(ctx)) return undefined;
@@ -555,7 +556,7 @@ export const CAMERA_MEMBERS = {
    * read-alias. Both verified live, and the write polarity is confirmed against the app's own frames.
    *
    * The read and the setter observe the SAME wire — see `powerCommand` — which is what makes this value
-   * track what it is told, and what lets `enablementReflection` confirm a write. The S350 family is the
+   * track what it is told, and what lets `enablementReflection` confirm a write. The S350 is the
    * exception: it is written through the privacy burst, which no reported param has been seen to follow, so
    * it is named by `unreflectedMembers` and its write dispatches unobserved.
    *
@@ -573,8 +574,9 @@ export const CAMERA_MEMBERS = {
     invert: true,
     invertFor: (ctx) => (isT8410HomeBase3(ctx) ? false : undefined),
     readAliases: [{ paramType: 2001, invert: false }],
-    // The S350 family is read from a 1035 its privacy-burst write never moves.
-    readReflectsWrite: (ctx) => !hasUnreflectedHomeBasePower(ctx) && !isIndoorPanTiltS350(ctx),
+    // The S350 is read from a 1035 its privacy-burst write never moves.
+    readReflectsWrite: (ctx) =>
+      !hasUnreflectedHomeBasePower(ctx) && ctx.deviceType !== DeviceType.INDOOR_PT_CAMERA_S350,
     description:
       "Camera enabled. Family-dependent wire param: 1035 CMD_DEVS_SWITCH (enable bit on T8410/HomeBase 3, " +
       "disable bit on battery/solo cams) or 2001 OPEN_DEVICE (standalone indoor/outdoor). Reported on/off state; " +

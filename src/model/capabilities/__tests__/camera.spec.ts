@@ -466,17 +466,11 @@ describe("camera capability module", () => {
      * Live: on an S350 (T8416), app privacy mode is a state 1035 never touches — a 1035 "on" left the camera
      * in privacy, recording nothing. Its power is privacy mode, so it rides the same wire `privacy` does.
      */
-    it("S350 family powers through the privacy burst: ON ⇒ privacy off, OFF ⇒ privacy on", () => {
-      for (const deviceType of [
-        DeviceType.INDOOR_PT_CAMERA_S350,
-        DeviceType.INDOOR_PT_CAMERA_E30,
-        DeviceType.INDOOR_PT_CAMERA_C220,
-      ]) {
-        const c = ctx(5, { deviceType });
-        expect(buildCommand("on", true, c)).toEqual({ kind: "p2p-privacy-burst", enabled: false, channel: 5 });
-        expect(buildCommand("off", false, c)).toEqual({ kind: "p2p-privacy-burst", enabled: true, channel: 5 });
-        expect(buildCommand("off", false, c)).toEqual(buildCommand("privacy", true, c));
-      }
+    it("S350 powers through the privacy burst: ON ⇒ privacy off, OFF ⇒ privacy on", () => {
+      const c = ctx(5, { deviceType: DeviceType.INDOOR_PT_CAMERA_S350 });
+      expect(buildCommand("on", true, c)).toEqual({ kind: "p2p-privacy-burst", enabled: false, channel: 5 });
+      expect(buildCommand("off", false, c)).toEqual({ kind: "p2p-privacy-burst", enabled: true, channel: 5 });
+      expect(buildCommand("off", false, c)).toEqual(buildCommand("privacy", true, c));
     });
   });
 
@@ -880,11 +874,11 @@ describe("camera enablement — observed write", () => {
   });
 
   /**
-   * The S350 family is written through the privacy burst, which the 1035 it reports never follows. Live, an
-   * S350's cloud record carried 1035 and no 6250, so the write dispatches unobserved and the read is named
+   * The S350 is written through the privacy burst, which the 1035 it reports never follows. Live, an S350's
+   * cloud record carried 1035 and no 6250, so the write dispatches unobserved and the read is named
    * unreflected rather than waited on.
    */
-  it("never observes the S350 family and names its enablement unreflected", () => {
+  it("never observes the S350 and names its enablement unreflected", () => {
     expect(observationFor(DeviceType.INDOOR_PT_CAMERA_S350, [CAMERA_ENABLE], true)).toBeUndefined();
     const reflects = CAMERA_MEMBERS.enabled.readReflectsWrite;
     const cam = (deviceType: number) =>
