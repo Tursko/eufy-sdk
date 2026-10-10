@@ -494,18 +494,16 @@ function poweredOf(ctx: CommandContext): "wired" | "battery" {
  * T8410/HomeBase 3 retains a useful startup enable bit, but it does not reliably reflect the privacy write.
  * Do not poll that bit to confirm the wrapped command. Other routes retain their existing readback.
  *
- * `undefined` where a device reported neither param and has no enablement readback.
+ * `undefined` where a device reported neither param and has no enablement readback, or where
+ * `readReflectsWrite` says its read does not follow the write.
  */
 function enablementReflection(
   on: boolean,
   ctx: CommandContext,
 ): { param: number; expected: boolean | number; observed: boolean } | undefined {
-  // Written through the privacy burst, which no reported param has been seen to follow: the 1035 this
-  // S350 reports never moves, and no S350 record has carried 6250.
-  if (ctx.deviceType === DeviceType.INDOOR_PT_CAMERA_S350) return undefined;
+  if (!CAMERA_MEMBERS.enabled.readReflectsWrite(ctx)) return undefined;
   const alias = CAMERA_MEMBERS.enabled.readAliases[0].paramType;
   if (ctx.paramIds.has(alias)) return { param: alias, expected: on, observed: on };
-  if (hasUnreflectedHomeBasePower(ctx)) return undefined;
   if (ctx.paramIds.has(CAMERA_CMD.CAMERA_ENABLE)) {
     return {
       param: CAMERA_CMD.CAMERA_ENABLE,
@@ -574,7 +572,6 @@ export const CAMERA_MEMBERS = {
     invert: true,
     invertFor: (ctx) => (isT8410HomeBase3(ctx) ? false : undefined),
     readAliases: [{ paramType: 2001, invert: false }],
-    // The S350 is read from a 1035 its privacy-burst write never moves.
     readReflectsWrite: (ctx) =>
       !hasUnreflectedHomeBasePower(ctx) && ctx.deviceType !== DeviceType.INDOOR_PT_CAMERA_S350,
     description:
