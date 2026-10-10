@@ -481,19 +481,6 @@ describe("camera capability module", () => {
   });
 
   describe("enabled — family-aware read (param + polarity)", () => {
-    // S350: privacy on (6250="1") is camera off, whatever the stale 1035 says.
-    it('S350 reads its power from 6250: "1" ⇒ disabled, "0" ⇒ enabled', () => {
-      const s350 = (privacy: string) =>
-        Device.fromRecord("SN", {
-          deviceType: DeviceType.INDOOR_PT_CAMERA_S350,
-          model: "T8416",
-          category: "eufy_security",
-          params: { 1035: "0", 6250: privacy },
-        });
-      expect(s350("1").getProperty("enabled")?.value).toBe(false);
-      expect(s350("0").getProperty("enabled")?.value).toBe(true);
-    });
-
     // Battery/solo cam reports on/off under 1035 (disable bit → "0" ⇒ ON). Verified live: T8114.
     it('1035="0" reads enabled=true (inverted disable bit)', () => {
       const dev = Device.fromRecord("SN", {
@@ -893,31 +880,16 @@ describe("camera enablement — observed write", () => {
   });
 
   /**
-   * The S350 family is written on 6250, so only 6250 confirms it: the 1035 it also reports never follows.
-   * Live, an S350's cloud record carried 1035 and no 6250 — that write dispatches unobserved.
+   * The S350 family is written through the privacy burst, which the 1035 it reports never follows. Live, an
+   * S350's cloud record carried 1035 and no 6250, so the write dispatches unobserved and the read is named
+   * unreflected rather than waited on.
    */
-  it("observes the S350 family on 6250 only", () => {
-    expect(observationFor(DeviceType.INDOOR_PT_CAMERA_S350, [CAMERA_ENABLE, 6250], true)).toEqual({
-      param: 6250,
-      expected: 0,
-      observed: true,
-    });
-    expect(observationFor(DeviceType.INDOOR_PT_CAMERA_S350, [CAMERA_ENABLE, 6250], false)).toEqual({
-      param: 6250,
-      expected: 1,
-      observed: false,
-    });
+  it("never observes the S350 family and names its enablement unreflected", () => {
     expect(observationFor(DeviceType.INDOOR_PT_CAMERA_S350, [CAMERA_ENABLE], true)).toBeUndefined();
-  });
-
-  it("names S350 enablement unreflected until the device reports 6250", () => {
     const reflects = CAMERA_MEMBERS.enabled.readReflectsWrite;
-    const s350 = (ids: number[]) =>
-      ({ channel: 0, codec: "camera", deviceType: DeviceType.INDOOR_PT_CAMERA_S350, paramIds: new Set(ids) }) as never;
-    expect(reflects(s350([CAMERA_ENABLE]))).toBe(false);
-    expect(reflects(s350([CAMERA_ENABLE, 6250]))).toBe(true);
-    expect(reflects({ channel: 0, codec: "camera", deviceType: 9, paramIds: new Set([CAMERA_ENABLE]) } as never)).toBe(
-      true,
-    );
+    const cam = (deviceType: number) =>
+      ({ channel: 0, codec: "camera", deviceType, paramIds: new Set([CAMERA_ENABLE]) }) as never;
+    expect(reflects(cam(DeviceType.INDOOR_PT_CAMERA_S350))).toBe(false);
+    expect(reflects(cam(9))).toBe(true);
   });
 });
